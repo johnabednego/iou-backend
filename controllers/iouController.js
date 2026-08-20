@@ -4,6 +4,8 @@ const IOUAttachment = require('../models/IOUAttachment');
 const Approval = require('../models/Approval');
 const User = require('../models/User');
 const Department = require('../models/Department');
+const ReconciliationRecord = require('../models/ReconciliationRecord');
+const ExpenseSubmission = require('../models/ExpenseSubmission');
 const sequelize = require('../config/database');
 const auditService = require('../services/auditService');
 const notificationService = require('../services/notificationService');
@@ -215,6 +217,46 @@ exports.listIOUs = [
           attributes: ['id', 'iou_id', 'approver_id', 'decision', 'step_order']
         });
       }
+
+      // Spending filter: overspent / underspent / exact
+      // diff_amount = actual - estimated
+      // > 0: Overspent (spent more than estimated)
+      // < 0: Underspent (spent less than estimated)
+      // = 0: Exact
+      const spending = (req.query.spending || '').trim().toLowerCase();
+      if (spending && ['overspent', 'underspent', 'exact'].includes(spending)) {
+        let reconWhere = {};
+        if (spending === 'overspent') {
+          reconWhere.diff_amount = { [Op.gt]: 0 }; // actual > estimated, diff is positive
+        } else if (spending === 'underspent') {
+          reconWhere.diff_amount = { [Op.lt]: 0 }; // actual < estimated, diff is negative
+        } else if (spending === 'exact') {
+          reconWhere.diff_amount = 0;
+        }
+        include.push({
+          model: ReconciliationRecord,
+          as: 'reconciliation',
+          required: true,
+          where: reconWhere,
+          attributes: ['id', 'estimated_amount', 'actual_amount', 'diff_amount', 'action_required']
+        });
+      } else {
+        // Always include reconciliation data (optional) so frontend can show spending outcome
+        include.push({
+          model: ReconciliationRecord,
+          as: 'reconciliation',
+          required: false,
+          attributes: ['id', 'estimated_amount', 'actual_amount', 'diff_amount', 'action_required']
+        });
+      }
+
+      // Also include ExpenseSubmission (optional) to show actual amount if available
+      include.push({
+        model: ExpenseSubmission,
+        as: 'expenses',
+        required: false,
+        attributes: ['id', 'actual_amount', 'status', 'submitted_at']
+      });
 
       // No second search block needed - requester display_name is already in the flat Op.or above
 

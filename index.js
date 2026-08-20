@@ -84,6 +84,22 @@ sequelize.sync({ force: false })
     } catch (err) {
       console.error('Failed to run LDAP HOD sync on startup:', err);
     }
+
+    // Start expense reminder cron job (checks every hour, sends reminders every 24h per IOU)
+    try {
+      const { checkAndSendExpenseReminders } = require('./services/reminderService');
+      // Run once on startup (after a short delay)
+      setTimeout(() => {
+        checkAndSendExpenseReminders().catch(err => console.error('Initial reminder check error:', err));
+      }, 10000);
+      // Then run every hour
+      setInterval(() => {
+        checkAndSendExpenseReminders().catch(err => console.error('Reminder cron error:', err));
+      }, 60 * 60 * 1000); // 1 hour
+      console.log('[ReminderService] Expense reminder cron started (hourly checks).');
+    } catch (err) {
+      console.error('Failed to start reminder service:', err.message);
+    }
   })
   .catch(err => console.error('Error syncing database:', err));
 

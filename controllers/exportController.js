@@ -5,9 +5,10 @@ const ExcelJS = require('exceljs');
 
 /**
  * GET /api/ious/export
- * Export REDEEMED IOUs to Excel (.xlsx) with FULL transaction details.
+ * Export IOUs to Excel (.xlsx) with FULL transaction details.
  * Access: ONLY cashier, admin, or is_approver=true. Normal users are blocked entirely.
- * Always forces status=REDEEMED regardless of client input.
+ * Accepts ALL the same filters as the dashboard/listIOUs:
+ *   - status, search, start_date, end_date, all, approved_by, spending
  */
 exports.exportRedeemed = [
   async (req, res) => {
@@ -23,8 +24,13 @@ exports.exportRedeemed = [
         });
       }
 
-      // Build query - always force REDEEMED status
-      const where = { status: 'REDEEMED' };
+      // Build query — respect all dashboard filters
+      const where = {};
+
+      // Status filter (if provided; no longer forced to REDEEMED)
+      if (req.query.status) {
+        where.status = req.query.status;
+      }
 
       // Date range
       if (req.query.start_date || req.query.end_date) {
@@ -53,46 +59,82 @@ exports.exportRedeemed = [
         where[Op.or] = searchOr;
       }
 
-      // Fetch IOUs with ALL related data
+      // Build includes
+      const include = [
+        {
+          model: User,
+          as: 'requester',
+          attributes: ['id', 'display_name', 'username', 'email', 'department'],
+          required: false
+        },
+        {
+          model: Approval,
+          as: 'approvals',
+          include: [
+            { model: User, as: 'approver', attributes: ['id', 'display_name', 'username'], required: false }
+          ],
+          required: false
+        },
+        {
+          model: Disbursement,
+          as: 'disbursements',
+          include: [
+            { model: User, as: 'cashier', attributes: ['id', 'display_name', 'username'], required: false }
+          ],
+          required: false
+        },
+        {
+          model: ExpenseSubmission,
+          as: 'expenses',
+          include: [
+            { model: User, as: 'submitter', attributes: ['id', 'display_name', 'username'], required: false }
+          ],
+          required: false
+        }
+      ];
+
+      // approved_by filter
+      const approvedBy = req.query.approved_by || null;
+      if (approvedBy) {
+        // Override the approvals include to be required with the filter
+        const appIdx = include.findIndex(i => i.as === 'approvals');
+        if (appIdx >= 0) {
+          include[appIdx].required = true;
+          include[appIdx].where = { approver_id: approvedBy };
+        }
+      }
+
+      // Spending filter: overspent / underspent / exact
+      // diff_amount = actual - estimated
+      const spending = (req.query.spending || '').trim().toLowerCase();
+      if (spending && ['overspent', 'underspent', 'exact'].includes(spending)) {
+        let reconWhere = {};
+        if (spending === 'overspent') {
+          reconWhere.diff_amount = { [Op.gt]: 0 }; // actual > estimated
+        } else if (spending === 'underspent') {
+          reconWhere.diff_amount = { [Op.lt]: 0 }; // actual < estimated
+        } else if (spending === 'exact') {
+          reconWhere.diff_amount = 0;
+        }
+        include.push({
+          model: ReconciliationRecord,
+          as: 'reconciliation',
+          required: true,
+          where: reconWhere,
+          attributes: ['id', 'estimated_amount', 'actual_amount', 'diff_amount', 'action_required', 'ifs_voucher_number', 'notes', 'confirmed_by_user', 'confirmed_by_cashier']
+        });
+      } else {
+        // Include reconciliation data without filtering
+        include.push({
+          model: ReconciliationRecord,
+          as: 'reconciliation',
+          required: false
+        });
+      }
+
       const rows = await IOURequest.findAll({
         where,
-        include: [
-          {
-            model: User,
-            as: 'requester',
-            attributes: ['id', 'display_name', 'username', 'email', 'department'],
-            required: false
-          },
-          {
-            model: Approval,
-            as: 'approvals',
-            include: [
-              { model: User, as: 'approver', attributes: ['id', 'display_name', 'username'], required: false }
-            ],
-            required: false
-          },
-          {
-            model: Disbursement,
-            as: 'disbursements',
-            include: [
-              { model: User, as: 'cashier', attributes: ['id', 'display_name', 'username'], required: false }
-            ],
-            required: false
-          },
-          {
-            model: ExpenseSubmission,
-            as: 'expenses',
-            include: [
-              { model: User, as: 'submitter', attributes: ['id', 'display_name', 'username'], required: false }
-            ],
-            required: false
-          },
-          {
-            model: ReconciliationRecord,
-            as: 'reconciliation',
-            required: false
-          }
-        ],
+        include,
         order: [['created_at', 'DESC']],
         limit: 10000
       });
@@ -110,8 +152,8 @@ exports.exportRedeemed = [
       workbook.creator = 'MPS IOU Manager';
       workbook.created = new Date();
 
-      const sheet = workbook.addWorksheet('Redeemed IOUs', {
-        headerFooter: { firstHeader: 'MPS IOU Manager - Redeemed IOUs Full Export' }
+      const sheet = workbook.addWorksheet('IOUs Export', {
+        headerFooter: { firstHeader: 'MPS IOU Manager - IOUs Export' }
       });
 
       // Define columns - full A-to-Z transaction details
@@ -164,6 +206,7 @@ exports.exportRedeemed = [
         { header: 'Reconciled Estimated', key: 'recon_estimated', width: 18 },
         { header: 'Reconciled Actual', key: 'recon_actual', width: 18 },
         { header: 'Difference', key: 'recon_diff', width: 14 },
+        { header: 'Spending Outcome', key: 'spending_outcome', width: 18 },
         { header: 'Action Required', key: 'recon_action', width: 22 },
         { header: 'Reconciliation IFS Voucher', key: 'recon_ifs_voucher', width: 22 },
         { header: 'Reconciliation Notes', key: 'recon_notes', width: 30 },
@@ -201,6 +244,20 @@ exports.exportRedeemed = [
 
         // Reconciliation
         const recon = iou.reconciliation || {};
+
+        // Determine spending outcome label
+        let spendingOutcome = '';
+        if (recon.diff_amount !== undefined && recon.diff_amount !== null) {
+          const diff = Number(recon.diff_amount);
+          if (diff > 0) spendingOutcome = 'Overspent';
+          else if (diff < 0) spendingOutcome = 'Underspent';
+          else spendingOutcome = 'Exact';
+        } else if (expense.actual_amount && iou.estimated_amount) {
+          const diff = Number(expense.actual_amount) - Number(iou.estimated_amount);
+          if (diff > 0) spendingOutcome = 'Overspent';
+          else if (diff < 0) spendingOutcome = 'Underspent';
+          else spendingOutcome = 'Exact';
+        }
 
         sheet.addRow({
           // IOU details
@@ -255,6 +312,7 @@ exports.exportRedeemed = [
           recon_estimated: recon.estimated_amount ? Number(recon.estimated_amount) : '',
           recon_actual: recon.actual_amount ? Number(recon.actual_amount) : '',
           recon_diff: recon.diff_amount ? Number(recon.diff_amount) : '',
+          spending_outcome: spendingOutcome,
           recon_action: recon.action_required || '',
           recon_ifs_voucher: recon.ifs_voucher_number || '',
           recon_notes: recon.notes || '',
@@ -266,30 +324,26 @@ exports.exportRedeemed = [
         });
       }
 
-      // Section header coloring: apply different fill colors for each section
+      // Section header coloring
       const sectionColors = {
-        // Cols A-K (1-11): IOU details - blue
         iou: { start: 1, end: 11, color: 'FF1F88E5' },
-        // Cols L-W (12-23): Approvals - green
         approvals: { start: 12, end: 23, color: 'FF2E7D32' },
-        // Cols X-AE (24-31): Disbursement - orange
         disbursement: { start: 24, end: 31, color: 'FFE65100' },
-        // Cols AF-AJ (32-36): Expense - purple
         expense: { start: 32, end: 36, color: 'FF6A1B9A' },
-        // Cols AK-AR (37-44): Reconciliation - teal
-        reconciliation: { start: 37, end: 44, color: 'FF00695C' },
-        // Col AS (45): Timestamps - dark grey
-        timestamps: { start: 45, end: 45, color: 'FF37474F' },
+        reconciliation: { start: 37, end: 45, color: 'FF00695C' },
+        timestamps: { start: 46, end: 46, color: 'FF37474F' },
       };
 
       for (const section of Object.values(sectionColors)) {
         for (let col = section.start; col <= section.end; col++) {
-          const cell = headerRow.getCell(col);
-          cell.fill = {
-            type: 'pattern',
-            pattern: 'solid',
-            fgColor: { argb: section.color }
-          };
+          if (col <= sheet.columnCount) {
+            const cell = headerRow.getCell(col);
+            cell.fill = {
+              type: 'pattern',
+              pattern: 'solid',
+              fgColor: { argb: section.color }
+            };
+          }
         }
       }
 
@@ -308,7 +362,7 @@ exports.exportRedeemed = [
 
       // Set response headers
       const timestamp = new Date().toISOString().slice(0, 10);
-      const filename = `redeemed_ious_full_${timestamp}.xlsx`;
+      const filename = `ious_export_${timestamp}.xlsx`;
 
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
