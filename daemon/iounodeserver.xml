@@ -1,0 +1,31 @@
+<service>
+	<id>iounodeserver.exe</id>
+	<name>IOUNodeServer</name>
+	<description>This is the IOU server service</description>
+	<executable>C:\nvm4w\nodejs\node.exe</executable>
+	<argument>--harmony</argument>
+	<argument>C:\IOU\backend\node_modules\node-windows\lib\wrapper.js</argument>
+	<argument>--file</argument>
+	<argument>C:\IOU\backend\index.js</argument>
+	<argument>--scriptoptions=</argument>
+	<argument>--log</argument>
+	<argument>IOUNodeServer wrapper</argument>
+	<argument>--grow</argument>
+	<argument>0.25</argument>
+	<argument>--wait</argument>
+	<argument>1</argument>
+	<argument>--maxrestarts</argument>
+	<argument>3</argument>
+	<argument>--abortonerror</argument>
+	<argument>n</argument>
+	<argument>--stopparentfirst</argument>
+	<argument>undefined</argument>
+	<logmode>rotate</logmode>
+	<stoptimeout>30sec</stoptimeout>
+	<serviceaccount>
+		<domain>MPSLOCAPPSVR</domain>
+		<user>LocalSystem</user>
+		<password></password>
+	</serviceaccount>
+	<workingdirectory>C:\IOU\backend</workingdirectory>
+</service>
