@@ -14,6 +14,7 @@ let Disbursement = null;
 let ExpenseSubmission = null;
 let ReconciliationRecord = null;
 let Department = null;
+let AppSetting = null;
 
 try { IOUAttachment = require('./IOUAttachment'); } catch (e) { IOUAttachment = null; }
 try { Notification = require('./Notification'); } catch (e) { Notification = null; }
@@ -22,6 +23,7 @@ try { Disbursement = require('./Disbursement'); } catch (e) { Disbursement = nul
 try { ExpenseSubmission = require('./ExpenseSubmission'); } catch (e) { ExpenseSubmission = null; }
 try { ReconciliationRecord = require('./ReconciliationRecord'); } catch (e) { ReconciliationRecord = null; }
 try { Department = require('./Department'); } catch (e) { Department = null; }
+try { AppSetting = require('./AppSetting'); } catch (e) { AppSetting = null; }
 
 // --------------------
 // Define associations
@@ -115,5 +117,6 @@ module.exports = {
   Disbursement,
   ExpenseSubmission,
   ReconciliationRecord,
-  Department
+  Department,
+  AppSetting
 };

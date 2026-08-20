@@ -166,9 +166,9 @@ exports.listIOUs = [
       }
 
       // Access control for IOU list:
-      // Cashiers and Admins can view all company IOUs (with optional requester_id filter)
+      // Cashiers, Admins, and Approvers can view all company IOUs (with optional requester_id filter)
       // All other users (HODs, Authorizers, Employees) only see IOUs they created OR are assigned to approve.
-      const isCashierOrAdmin = actor.is_admin || actor.role === 'cashier';
+      const isCashierOrAdmin = actor.is_admin || actor.role === 'cashier' || actor.is_approver === true;
 
       if (!isCashierOrAdmin) {
         const userApprovalRecords = await Approval.findAll({

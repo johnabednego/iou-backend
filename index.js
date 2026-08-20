@@ -17,6 +17,8 @@ const disbursementRoutes = require('./routes/disbursementRoutes');
 const expenseRoutes = require('./routes/expenseRoutes');
 const auditRoutes = require('./routes/auditRoutes');
 const departmentRoutes = require('./routes/departmentRoutes');
+const settingsRoutes = require('./routes/settingsRoutes');
+const exportRoutes = require('./routes/exportRoutes');
 
 const setupSwaggerDocs = require('./config/swagger');
 
@@ -38,6 +40,8 @@ app.use(session({
 // Define routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
+// Export route MUST be mounted before main IOU routes so /export is matched before /:id
+app.use('/api/ious', exportRoutes);
 app.use('/api/ious', iouRoutes);
 app.use('/api/ious', disbursementRoutes);
 app.use('/api/ious', expenseRoutes);
@@ -46,6 +50,7 @@ app.use('/api/uploads', uploadRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/audit-logs', auditRoutes);
 app.use('/api/departments', departmentRoutes);
+app.use('/api/settings', settingsRoutes);
 
 // Setup Swagger Docs
 setupSwaggerDocs(app);
