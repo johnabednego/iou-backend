@@ -139,6 +139,10 @@ exports.exportRedeemed = [
         limit: 10000
       });
 
+      if (rows.length === 0) {
+        return res.status(404).json({ message: 'No IOUs found matching the selected filters to export.' });
+      }
+
       // Helper to format date
       const fmtDate = (dt) => {
         if (!dt) return '';
