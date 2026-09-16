@@ -6,6 +6,8 @@ const sequelize = require('../config/database');
 const auditService = require('../services/auditService');
 const notificationService = require('../services/notificationService');
 const emailService = require('../services/emailService');
+const FundBalance = require('../models/FundBalance');
+const FundTransaction = require('../models/FundTransaction');
 
 /**
  * POST /api/ious/:id/disburse
@@ -39,6 +41,37 @@ exports.disburse = [
         payment_reference: payment_reference || null,
         disbursed_at: new Date(),
         notes: notes || null
+      }, { transaction: t });
+
+      // ─── Fund Balance Deduction ───
+      const iouCurrency = (iou.currency || 'GHS').toUpperCase();
+      const numAmount = Number(amount);
+      const fundBalance = await FundBalance.findOne({ where: { currency: iouCurrency }, transaction: t });
+      const currentAvailable = fundBalance ? Number(fundBalance.available_amount) : 0;
+
+      if (currentAvailable < numAmount) {
+        await t.rollback();
+        return res.status(400).json({
+          message: `Insufficient ${iouCurrency} funds to disburse. Please update the fund balance before disbursing.`
+        });
+      }
+
+      const newBalance = currentAvailable - numAmount;
+      if (fundBalance) {
+        await fundBalance.update({
+          available_amount: newBalance,
+          last_updated_by: actor.id
+        }, { transaction: t });
+      }
+
+      await FundTransaction.create({
+        currency: iouCurrency,
+        type: 'DISBURSEMENT_DEBIT',
+        amount: numAmount,
+        balance_after: newBalance,
+        reference_id: iou.id,
+        performed_by: actor.id,
+        notes: `Disbursement for IOU ${iou.request_number}`
       }, { transaction: t });
 
       await iou.update({ status: 'DISBURSED' }, { transaction: t });

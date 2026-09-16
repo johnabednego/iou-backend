@@ -15,6 +15,9 @@ let ExpenseSubmission = null;
 let ReconciliationRecord = null;
 let Department = null;
 let AppSetting = null;
+let Currency = null;
+let FundBalance = null;
+let FundTransaction = null;
 
 try { IOUAttachment = require('./IOUAttachment'); } catch (e) { IOUAttachment = null; }
 try { Notification = require('./Notification'); } catch (e) { Notification = null; }
@@ -24,6 +27,9 @@ try { ExpenseSubmission = require('./ExpenseSubmission'); } catch (e) { ExpenseS
 try { ReconciliationRecord = require('./ReconciliationRecord'); } catch (e) { ReconciliationRecord = null; }
 try { Department = require('./Department'); } catch (e) { Department = null; }
 try { AppSetting = require('./AppSetting'); } catch (e) { AppSetting = null; }
+try { Currency = require('./Currency'); } catch (e) { Currency = null; }
+try { FundBalance = require('./FundBalance'); } catch (e) { FundBalance = null; }
+try { FundTransaction = require('./FundTransaction'); } catch (e) { FundTransaction = null; }
 
 // --------------------
 // Define associations
@@ -103,6 +109,16 @@ if (Department && User) {
   User.hasOne(Department, { foreignKey: 'hod_user_id', as: 'hodOfDepartment' });
 }
 
+// FundBalance -> User (last_updated_by)
+if (FundBalance && User) {
+  FundBalance.belongsTo(User, { foreignKey: 'last_updated_by', as: 'updatedBy' });
+}
+
+// FundTransaction -> User (performed_by)
+if (FundTransaction && User) {
+  FundTransaction.belongsTo(User, { foreignKey: 'performed_by', as: 'performer' });
+}
+
 // --------------------
 // Export everything
 // --------------------
@@ -118,5 +134,8 @@ module.exports = {
   ExpenseSubmission,
   ReconciliationRecord,
   Department,
-  AppSetting
+  AppSetting,
+  Currency,
+  FundBalance,
+  FundTransaction
 };

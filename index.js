@@ -19,6 +19,9 @@ const auditRoutes = require('./routes/auditRoutes');
 const departmentRoutes = require('./routes/departmentRoutes');
 const settingsRoutes = require('./routes/settingsRoutes');
 const exportRoutes = require('./routes/exportRoutes');
+const currencyRoutes = require('./routes/currencyRoutes');
+const fundRoutes = require('./routes/fundRoutes');
+const analyticsRoutes = require('./routes/analyticsRoutes');
 
 const setupSwaggerDocs = require('./config/swagger');
 
@@ -51,6 +54,9 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/audit-logs', auditRoutes);
 app.use('/api/departments', departmentRoutes);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/currencies', currencyRoutes);
+app.use('/api/funds', fundRoutes);
+app.use('/api/analytics', analyticsRoutes);
 
 // Setup Swagger Docs
 setupSwaggerDocs(app);
@@ -76,6 +82,32 @@ sequelize.sync({ force: false })
       if (results > 0) console.log(`Migrated ${results} user(s) from 'finance' to 'authorizer' role.`);
     } catch (err) {
       console.warn('Finance→Authorizer migration skipped:', err.message);
+    }
+
+    // Seed default currencies if none exist
+    try {
+      const Currency = require('./models/Currency');
+      const FundBalance = require('./models/FundBalance');
+      const count = await Currency.count();
+      if (count === 0) {
+        const defaults = [
+          { code: 'GHS', name: 'Ghana Cedi', symbol: '₵' },
+          { code: 'USD', name: 'US Dollar', symbol: '$' },
+          { code: 'EUR', name: 'Euro', symbol: '€' },
+          { code: 'GBP', name: 'British Pound', symbol: '£' }
+        ];
+        await Currency.bulkCreate(defaults);
+        // Also create fund balance records (starting at 0)
+        for (const cur of defaults) {
+          await FundBalance.findOrCreate({
+            where: { currency: cur.code },
+            defaults: { available_amount: 0 }
+          });
+        }
+        console.log('Seeded default currencies: GHS, USD, EUR, GBP');
+      }
+    } catch (err) {
+      console.warn('Currency seeding skipped:', err.message);
     }
 
     try {

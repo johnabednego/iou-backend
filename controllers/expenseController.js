@@ -9,6 +9,8 @@ const sequelize = require('../config/database');
 const auditService = require('../services/auditService');
 const notificationService = require('../services/notificationService');
 const emailService = require('../services/emailService');
+const FundBalance = require('../models/FundBalance');
+const FundTransaction = require('../models/FundTransaction');
 const { Op } = require('sequelize');
 
 /**
@@ -687,6 +689,45 @@ exports.reconcile = [
         ifs_voucher_number: ifs_voucher_number.trim(),
         created_by: actor.id
       }, { transaction: t });
+
+      // ─── Fund Balance Adjustment on Reconciliation ───
+      const iouCurrency = (iou.currency || 'GHS').toUpperCase();
+      if (diff !== 0) {
+        const fundBalance = await FundBalance.findOne({ where: { currency: iouCurrency }, transaction: t });
+        const currentAvailable = fundBalance ? Number(fundBalance.available_amount) : 0;
+        let newBalance = currentAvailable;
+        let txType = 'RECONCILIATION_ADJUSTMENT';
+        let txNotes = '';
+
+        if (diff > 0) {
+          // Overspent: actual > estimated — deduct the overspent difference
+          newBalance = currentAvailable - diff;
+          txNotes = `Overspent reconciliation for IOU ${iou.request_number}: additional ${diff.toFixed(2)} ${iouCurrency} deducted`;
+          // Allow negative balance (cashier will need to top up) — don't block reconciliation
+        } else {
+          // Underspent: actual < estimated — credit the underspent difference back
+          const creditAmount = Math.abs(diff);
+          newBalance = currentAvailable + creditAmount;
+          txNotes = `Underspent reconciliation for IOU ${iou.request_number}: ${creditAmount.toFixed(2)} ${iouCurrency} credited back`;
+        }
+
+        if (fundBalance) {
+          await fundBalance.update({
+            available_amount: newBalance,
+            last_updated_by: actor.id
+          }, { transaction: t });
+        }
+
+        await FundTransaction.create({
+          currency: iouCurrency,
+          type: txType,
+          amount: Math.abs(diff),
+          balance_after: newBalance,
+          reference_id: iou.id,
+          performed_by: actor.id,
+          notes: txNotes
+        }, { transaction: t });
+      }
 
       await expense.update({ status: 'RECONCILED' }, { transaction: t });
       await iou.update({ status: 'RECONCILED', ifs_voucher_number: ifs_voucher_number.trim() }, { transaction: t });

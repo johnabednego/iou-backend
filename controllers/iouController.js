@@ -10,6 +10,7 @@ const sequelize = require('../config/database');
 const auditService = require('../services/auditService');
 const notificationService = require('../services/notificationService');
 const emailService = require('../services/emailService');
+const FundBalance = require('../models/FundBalance');
 const { Op } = require('sequelize');
 
 
@@ -38,13 +39,26 @@ exports.createIOU = [
 
       const { purpose, estimated_amount, currency, attachments } = req.body;
 
+      // Fund sufficiency check
+      const iouCurrency = (currency || 'GHS').toUpperCase().trim();
+      if (estimated_amount && Number(estimated_amount) > 0) {
+        const fundBalance = await FundBalance.findOne({ where: { currency: iouCurrency }, transaction: t });
+        const available = fundBalance ? Number(fundBalance.available_amount) : 0;
+        if (available < Number(estimated_amount)) {
+          await t.rollback();
+          return res.status(400).json({
+            message: 'Insufficient funds available for this currency. Please contact the Finance Department.'
+          });
+        }
+      }
+
       const iou = await IOURequest.create({
         request_number: generateRequestNumber(),
         requester_id: actor.id,
         department: actor.department || null,
         purpose: purpose || null,
         estimated_amount: estimated_amount || null,
-        currency: currency || 'GHS',
+        currency: iouCurrency,
         status: 'DRAFT'
       }, { transaction: t });
 
@@ -137,6 +151,8 @@ exports.listIOUs = [
       // status filter
       if (req.query.status) where.status = req.query.status;
       if (req.query.department) where.department = req.query.department;
+      // currency filter
+      if (req.query.currency) where.currency = req.query.currency.toUpperCase().trim();
 
       // date range
       if (req.query.start_date || req.query.end_date) {
