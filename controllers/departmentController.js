@@ -482,7 +482,10 @@ exports.mergeDepartments = [
         return res.status(403).json({ message: 'Only admin or cashier can merge departments' });
       }
 
-      const { source_id, target_id } = req.body;
+      const source_id = req.body.source_id || req.body.source_department_id;
+      const target_id = req.body.target_id || req.body.target_department_id;
+      const keepAlias = req.body.keep_alias !== false;
+
       if (!source_id || !target_id) {
         await t.rollback();
         return res.status(400).json({ message: 'source_id and target_id are required' });
@@ -492,8 +495,25 @@ exports.mergeDepartments = [
         return res.status(400).json({ message: 'Source and target departments cannot be the same' });
       }
 
-      const source = await Department.findByPk(source_id, { transaction: t });
-      const target = await Department.findByPk(target_id, { transaction: t });
+      const source = await Department.findOne({
+        where: {
+          [Op.or]: [
+            { id: source_id },
+            { name: source_id }
+          ]
+        },
+        transaction: t
+      });
+      const target = await Department.findOne({
+        where: {
+          [Op.or]: [
+            { id: target_id },
+            { name: target_id }
+          ]
+        },
+        transaction: t
+      });
+
       if (!source || !target) {
         await t.rollback();
         return res.status(404).json({ message: 'One or both departments not found' });
@@ -524,19 +544,21 @@ exports.mergeDepartments = [
         await target.update({ hod_user_id: source.hod_user_id }, { transaction: t });
       }
 
-      // 4. Append source.name and source.ldap_aliases to target.ldap_aliases
-      const existingAliases = (target.ldap_aliases || '')
-        .split(',')
-        .map(a => a.trim())
-        .filter(Boolean);
-      const sourceAliases = (source.ldap_aliases || '')
-        .split(',')
-        .map(a => a.trim())
-        .filter(Boolean);
-      const combinedAliases = Array.from(new Set([...existingAliases, source.name, ...sourceAliases]))
-        .filter(a => a.toLowerCase() !== target.name.toLowerCase());
+      // 4. Append source.name and source.ldap_aliases to target.ldap_aliases if requested
+      if (keepAlias) {
+        const existingAliases = (target.ldap_aliases || '')
+          .split(',')
+          .map(a => a.trim())
+          .filter(Boolean);
+        const sourceAliases = (source.ldap_aliases || '')
+          .split(',')
+          .map(a => a.trim())
+          .filter(Boolean);
+        const combinedAliases = Array.from(new Set([...existingAliases, source.name, ...sourceAliases]))
+          .filter(a => a.toLowerCase() !== target.name.toLowerCase());
 
-      await target.update({ ldap_aliases: combinedAliases.join(', ') }, { transaction: t });
+        await target.update({ ldap_aliases: combinedAliases.join(', ') }, { transaction: t });
+      }
 
       // 5. Remove source department
       await DepartmentHOD.destroy({ where: { department_id: source.id }, transaction: t });
