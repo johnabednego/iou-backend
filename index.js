@@ -110,13 +110,6 @@ sequelize.sync({ force: false })
       console.warn('Currency seeding skipped:', err.message);
     }
 
-    try {
-      const { syncLdapDepartmentsAndHods } = require('./services/ldapSyncService');
-      await syncLdapDepartmentsAndHods();
-    } catch (err) {
-      console.error('Failed to run LDAP HOD sync on startup:', err);
-    }
-
     // Start expense reminder cron job (checks every hour, sends reminders every 24h per IOU)
     try {
       const { checkAndSendExpenseReminders } = require('./services/reminderService');

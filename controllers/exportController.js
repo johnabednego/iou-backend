@@ -16,20 +16,54 @@ exports.exportRedeemed = [
       const actor = req.currentUser;
       if (!actor) return res.status(401).json({ message: 'Not authenticated' });
 
-      // Access control: ONLY cashier, admin, or managed approver — no exceptions
-      const canExport = actor.is_admin || actor.role === 'cashier' || actor.is_approver === true;
+      // Access control: Cashier, Admin, Approver, or HOD
+      const isHod = actor.role === 'hod';
+      const canExport = actor.is_admin || actor.role === 'cashier' || actor.is_approver === true || isHod;
       if (!canExport) {
         return res.status(403).json({
-          message: 'Export is restricted to Cashiers, Admins, and Approvers only.'
+          message: 'Export is restricted to Cashiers, Admins, Approvers, and Heads of Department only.'
         });
       }
 
       // Build query — respect all dashboard filters
       const where = {};
 
-      // Status filter (if provided; no longer forced to REDEEMED)
+      // Status filter
       if (req.query.status) {
         where.status = req.query.status;
+      }
+
+      // Department filter
+      if (req.query.department) {
+        where.department = req.query.department;
+      }
+
+      // Currency filter
+      if (req.query.currency) {
+        where.currency = req.query.currency.toUpperCase().trim();
+      }
+
+      // If user is an HOD (and not cashier/admin), restrict export to their department(s)
+      if (!actor.is_admin && actor.role !== 'cashier' && !actor.is_approver) {
+        const DepartmentHOD = require('../models/DepartmentHOD');
+        const Department = require('../models/Department');
+        const hodLinks = await DepartmentHOD.findAll({ where: { user_id: actor.id }, attributes: ['department_id'], raw: true });
+        const deptIds = hodLinks.map(h => h.department_id);
+        const managedDepts = await Department.findAll({
+          where: { [Op.or]: [...(deptIds.length > 0 ? [{ id: { [Op.in]: deptIds } }] : []), { hod_user_id: actor.id }] },
+          attributes: ['name'], raw: true
+        });
+        const deptNames = managedDepts.map(d => d.name);
+        if (actor.role === 'hod' && actor.department && !deptNames.includes(actor.department)) deptNames.push(actor.department);
+        if (deptNames.length > 0) {
+          if (where.department) {
+            if (!deptNames.includes(where.department)) {
+              return res.status(403).json({ message: 'You can only export IOUs for your assigned department(s).' });
+            }
+          } else {
+            where.department = { [Op.in]: deptNames };
+          }
+        }
       }
 
       // Date range

@@ -185,7 +185,8 @@ exports.listIOUs = [
 
       // Access control for IOU list:
       // Cashiers, Admins, and Approvers can view all company IOUs (with optional requester_id filter)
-      // All other users (HODs, Authorizers, Employees) only see IOUs they created OR are assigned to approve.
+      // HODs can view IOUs they created, IOUs they approve, PLUS all IOUs belonging to their department(s)
+      // Normal employees only see IOUs they created OR are assigned to approve.
       const isCashierOrAdmin = actor.is_admin || actor.role === 'cashier' || actor.is_approver === true;
 
       if (!isCashierOrAdmin) {
@@ -200,6 +201,35 @@ exports.listIOUs = [
         if (approvedIouIds.length > 0) {
           userVisibilityCond.push({ id: { [Op.in]: approvedIouIds } });
         }
+
+        // If user is an HOD, also include all IOUs from departments they head
+        try {
+          const DepartmentHOD = require('../models/DepartmentHOD');
+          const hodLinks = await DepartmentHOD.findAll({
+            where: { user_id: actor.id },
+            attributes: ['department_id'],
+            raw: true
+          });
+          const deptIds = hodLinks.map(h => h.department_id);
+          const managedDepts = await Department.findAll({
+            where: {
+              [Op.or]: [
+                ...(deptIds.length > 0 ? [{ id: { [Op.in]: deptIds } }] : []),
+                { hod_user_id: actor.id }
+              ]
+            },
+            attributes: ['name'],
+            raw: true
+          });
+          const deptNames = managedDepts.map(d => d.name);
+          if (actor.role === 'hod' && actor.department && !deptNames.includes(actor.department)) {
+            deptNames.push(actor.department);
+          }
+
+          if (deptNames.length > 0) {
+            userVisibilityCond.push({ department: { [Op.in]: deptNames } });
+          }
+        } catch (_) {}
 
         if (where[Op.or]) {
           const searchCond = where[Op.or];
@@ -574,7 +604,9 @@ exports.assignApprovers = [
 
         // Step 1 check (when no approvals decided yet)
         if (idx === 0 && decidedApprovals.length === 0) {
-          if (user.role !== 'hod') {
+          const DepartmentHOD = require('../models/DepartmentHOD');
+          const isDeptHod = await DepartmentHOD.findOne({ where: { user_id: user.id }, transaction: t });
+          if (user.role !== 'hod' && !isDeptHod) {
             await t.rollback();
             const currentRole = user.role || 'no role assigned';
             return res.status(400).json({
@@ -587,13 +619,15 @@ exports.assignApprovers = [
 
         // Step 2+ check (or subsequent steps): must be in managed Approvers list, Finance, Admin, or HOD
         if (idx > 0 || decidedApprovals.length > 0) {
+          const DepartmentHOD = require('../models/DepartmentHOD');
           const isManagedApprover = user.is_approver === true;
           const isFinance = user.department && user.department.toLowerCase().includes('finance');
           const isAdmin = user.is_admin === true;
           const isHodRole = user.role === 'hod';
           const isHodDept = await Department.findOne({ where: { hod_user_id: user.id }, transaction: t });
+          const isDeptHodEntry = await DepartmentHOD.findOne({ where: { user_id: user.id }, transaction: t });
 
-          if (!isManagedApprover && !isFinance && !isAdmin && !isHodRole && !isHodDept) {
+          if (!isManagedApprover && !isFinance && !isAdmin && !isHodRole && !isHodDept && !isDeptHodEntry) {
             await t.rollback();
             return res.status(400).json({
               message: `User "${name}" cannot be assigned as an approver. Approvers must be added to the Approvers list, belong to the Finance department, be an Admin, or be a Head of Department.`

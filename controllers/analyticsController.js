@@ -16,7 +16,48 @@ exports.getDashboardAnalytics = [
       if (!actor) return res.status(401).json({ message: 'Not authenticated' });
 
       const isPrivileged = actor.is_admin || actor.role === 'cashier' || actor.is_approver;
-      const userFilter = isPrivileged ? {} : { requester_id: actor.id };
+      const isHod = actor.role === 'hod';
+      let userFilter = {};
+
+      // Find departments managed by HOD
+      let hodDeptNames = [];
+      if (isHod) {
+        try {
+          const DepartmentHOD = require('../models/DepartmentHOD');
+          const Department = require('../models/Department');
+          const hodLinks = await DepartmentHOD.findAll({ where: { user_id: actor.id }, attributes: ['department_id'], raw: true });
+          const deptIds = hodLinks.map(h => h.department_id);
+          const managedDepts = await Department.findAll({
+            where: { [Op.or]: [...(deptIds.length > 0 ? [{ id: { [Op.in]: deptIds } }] : []), { hod_user_id: actor.id }] },
+            attributes: ['name'], raw: true
+          });
+          hodDeptNames = managedDepts.map(d => d.name);
+          if (actor.department && !hodDeptNames.includes(actor.department)) {
+            hodDeptNames.push(actor.department);
+          }
+        } catch (_) {}
+      }
+
+      if (isPrivileged) {
+        userFilter = {};
+      } else if (isHod && hodDeptNames.length > 0) {
+        userFilter = {
+          [Op.or]: [
+            { department: { [Op.in]: hodDeptNames } },
+            { requester_id: actor.id }
+          ]
+        };
+      } else {
+        userFilter = { requester_id: actor.id };
+      }
+
+      // Department filter from query param
+      const queryDept = req.query.department ? req.query.department.trim() : null;
+      if (queryDept) {
+        if (isPrivileged || (isHod && hodDeptNames.includes(queryDept))) {
+          userFilter = { ...userFilter, department: queryDept };
+        }
+      }
 
       const now = new Date();
 
@@ -75,14 +116,15 @@ exports.getDashboardAnalytics = [
 
       // ─── 3. Spending Breakdown (Overspent / Underspent / Exact) ───
       let spendingWhere = {};
-      if (!isPrivileged) {
-        // Get IOU IDs belonging to this user
-        const userIouIds = await IOURequest.findAll({
+      if (isPrivileged && !queryDept) {
+        spendingWhere = {};
+      } else {
+        const matchingIous = await IOURequest.findAll({
           attributes: ['id'],
-          where: { requester_id: actor.id },
+          where: userFilter,
           raw: true
         });
-        spendingWhere = { iou_id: { [Op.in]: userIouIds.map(i => i.id) } };
+        spendingWhere = { iou_id: { [Op.in]: matchingIous.map(i => i.id) } };
       }
 
       const reconciliations = await ReconciliationRecord.findAll({
@@ -240,6 +282,28 @@ exports.getDashboardAnalytics = [
         monthlyApprovedChart.push(entry);
       }
 
+      // ─── 9. Department Breakdown ───
+      const deptBreakdownRaw = await IOURequest.findAll({
+        attributes: [
+          'department',
+          [fn('COUNT', col('id')), 'count'],
+          [fn('SUM', col('estimated_amount')), 'total_amount']
+        ],
+        where: {
+          ...userFilter,
+          department: { [Op.ne]: null }
+        },
+        group: ['department'],
+        order: [[fn('COUNT', col('id')), 'DESC']],
+        raw: true
+      });
+
+      const departmentBreakdown = deptBreakdownRaw.map(d => ({
+        department: d.department || 'Unassigned',
+        count: parseInt(d.count) || 0,
+        total_amount: Number(d.total_amount) || 0
+      }));
+
       return res.json({
         data: {
           iousByMonth,
@@ -253,7 +317,9 @@ exports.getDashboardAnalytics = [
             count: parseInt(c.count),
             total_amount: Number(c.total_amount) || 0
           })),
-          monthlyApprovedChart
+          monthlyApprovedChart,
+          departmentBreakdown,
+          userDepartments: hodDeptNames
         }
       });
     } catch (err) {

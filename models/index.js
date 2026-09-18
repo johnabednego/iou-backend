@@ -14,6 +14,7 @@ let Disbursement = null;
 let ExpenseSubmission = null;
 let ReconciliationRecord = null;
 let Department = null;
+let DepartmentHOD = null;
 let AppSetting = null;
 let Currency = null;
 let FundBalance = null;
@@ -26,6 +27,7 @@ try { Disbursement = require('./Disbursement'); } catch (e) { Disbursement = nul
 try { ExpenseSubmission = require('./ExpenseSubmission'); } catch (e) { ExpenseSubmission = null; }
 try { ReconciliationRecord = require('./ReconciliationRecord'); } catch (e) { ReconciliationRecord = null; }
 try { Department = require('./Department'); } catch (e) { Department = null; }
+try { DepartmentHOD = require('./DepartmentHOD'); } catch (e) { DepartmentHOD = null; }
 try { AppSetting = require('./AppSetting'); } catch (e) { AppSetting = null; }
 try { Currency = require('./Currency'); } catch (e) { Currency = null; }
 try { FundBalance = require('./FundBalance'); } catch (e) { FundBalance = null; }
@@ -103,10 +105,18 @@ if (ReconciliationRecord && IOURequest) {
   IOURequest.hasOne(ReconciliationRecord, { foreignKey: 'iou_id', as: 'reconciliation' });
 }
 
-// Department -> User (HoD)
+// Department -> User (HoDs: multiple HODs supported via DepartmentHOD)
 if (Department && User) {
   Department.belongsTo(User, { foreignKey: 'hod_user_id', as: 'hod' });
   User.hasOne(Department, { foreignKey: 'hod_user_id', as: 'hodOfDepartment' });
+
+  if (DepartmentHOD) {
+    Department.belongsToMany(User, { through: DepartmentHOD, as: 'hods', foreignKey: 'department_id' });
+    User.belongsToMany(Department, { through: DepartmentHOD, as: 'hodDepartments', foreignKey: 'user_id' });
+    Department.hasMany(DepartmentHOD, { foreignKey: 'department_id', as: 'departmentHods' });
+    DepartmentHOD.belongsTo(Department, { foreignKey: 'department_id', as: 'department' });
+    DepartmentHOD.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+  }
 }
 
 // FundBalance -> User (last_updated_by)
@@ -134,6 +144,7 @@ module.exports = {
   ExpenseSubmission,
   ReconciliationRecord,
   Department,
+  DepartmentHOD,
   AppSetting,
   Currency,
   FundBalance,

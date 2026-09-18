@@ -374,7 +374,10 @@ exports.assignExpenseApprovers = [
         const isManagedApprover = user.is_approver === true;
         const isFinance = user.department && user.department.toLowerCase().includes('finance');
         const isAdmin = user.is_admin === true;
-        const isHod = await Department.findOne({ where: { hod_user_id: user.id }, transaction: t }) || user.role === 'hod';
+        const DepartmentHOD = require('../models/DepartmentHOD');
+        const isHodDept = await Department.findOne({ where: { hod_user_id: user.id }, transaction: t });
+        const isDeptHodEntry = await DepartmentHOD.findOne({ where: { user_id: user.id }, transaction: t });
+        const isHod = isHodDept || isDeptHodEntry || user.role === 'hod';
 
         if (!isManagedApprover && !isFinance && !isAdmin && !isHod) {
           await t.rollback();

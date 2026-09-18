@@ -211,9 +211,9 @@ exports.updateUser = [
       }
 
       // Allowed to update for owners: display_name, email, department_id, is_active
-      // Admins can also update role and is_admin
+      // Admins can also update role, is_admin, and department
       const allowedForOwner = ['display_name', 'email', 'department_id', 'is_active', 'metadata'];
-      const allowedForAdmin = ['role', 'is_admin'];
+      const allowedForAdmin = ['role', 'is_admin', 'department'];
       const payload = {};
 
       allowedForOwner.forEach(k => {
@@ -232,6 +232,17 @@ exports.updateUser = [
       }
 
       await user.update(payload);
+
+      // If department changed and user is HOD, update department_hods
+      if (isAdmin && payload.department && payload.department !== user.department && user.role === 'hod') {
+        const Department = require('../models/Department');
+        const DepartmentHOD = require('../models/DepartmentHOD');
+        await DepartmentHOD.destroy({ where: { user_id: user.id } });
+        const newDept = await Department.findOne({ where: { name: payload.department } });
+        if (newDept) {
+          await DepartmentHOD.findOrCreate({ where: { department_id: newDept.id, user_id: user.id } });
+        }
+      }
       return res.json({ message: 'User updated', user });
     } catch (err) {
       console.error('updateUser error', err);
@@ -265,36 +276,28 @@ exports.setRole = [
       if (typeof role !== 'undefined') updates.role = role;
       if (typeof is_admin !== 'undefined') updates.is_admin = !!is_admin;
 
-      // HOD swap logic: when assigning role 'hod', update department table
+      // HOD assignment logic: allow multiple HODs per department without demoting existing HODs
+      const DepartmentHOD = require('../models/DepartmentHOD');
       if (role === 'hod' && user.department) {
         const dept = await Department.findOne({ where: { name: user.department } });
         if (dept) {
-          if (dept.hod_user_id && dept.hod_user_id !== user.id) {
-            // Different HOD already assigned
-            if (!confirm_replace) {
-              // Fetch current HOD name for warning
-              const currentHod = await User.findByPk(dept.hod_user_id);
-              return res.status(409).json({
-                message: `Department "${dept.name}" already has an HOD: ${currentHod?.display_name || currentHod?.username || 'Unknown'}. Do you want to replace them?`,
-                warning: true,
-                current_hod: currentHod ? { id: currentHod.id, display_name: currentHod.display_name, username: currentHod.username } : null,
-                requires_confirm: true
-              });
-            }
-            // confirm_replace is true - demote old HOD to employee
-            const oldHodId = dept.hod_user_id;
-            await User.update({ role: 'employee' }, { where: { id: oldHodId } });
+          await DepartmentHOD.findOrCreate({
+            where: { department_id: dept.id, user_id: user.id }
+          });
+          if (!dept.hod_user_id) {
+            await dept.update({ hod_user_id: user.id });
           }
-          // Set new HOD
-          await dept.update({ hod_user_id: user.id });
         }
       }
 
-      // If user was HOD and is being changed to a different role, clear them from department
-      if (role && role !== 'hod' && user.role === 'hod' && user.department) {
-        const dept = await Department.findOne({ where: { name: user.department, hod_user_id: user.id } });
+      // If user was HOD and is being changed to a different role, remove them from department_hods
+      if (role && role !== 'hod' && user.role === 'hod') {
+        await DepartmentHOD.destroy({ where: { user_id: user.id } });
+        // If they were primary hod_user_id on department, update to next available HOD or null
+        const dept = await Department.findOne({ where: { hod_user_id: user.id } });
         if (dept) {
-          await dept.update({ hod_user_id: null });
+          const nextHod = await DepartmentHOD.findOne({ where: { department_id: dept.id } });
+          await dept.update({ hod_user_id: nextHod ? nextHod.user_id : null });
         }
       }
 
@@ -407,20 +410,29 @@ exports.addUserByEmail = [
       // Upsert user from LDAP entry
       const user = await User.upsertFromLdap(ldapEntry);
 
-      // Apply role and admin flag
+      // Apply role and admin flag and custom department
       const updates = {};
       if (role) updates.role = role;
       if (typeof is_admin !== 'undefined') updates.is_admin = !!is_admin;
+      if (req.body.department) updates.department = req.body.department;
       if (Object.keys(updates).length > 0) {
         await user.update(updates);
       }
 
-      // If role is hod, update department table
+      // If role is hod, update department table and department_hods join table
       if (role === 'hod' && user.department) {
         const Department = require('../models/Department');
+        const DepartmentHOD = require('../models/DepartmentHOD');
         const dept = await Department.findOne({ where: { name: user.department } });
         if (dept) {
-          await dept.update({ hod_user_id: user.id });
+          if (DepartmentHOD) {
+            await DepartmentHOD.findOrCreate({
+              where: { department_id: dept.id, user_id: user.id }
+            });
+          }
+          if (!dept.hod_user_id) {
+            await dept.update({ hod_user_id: user.id });
+          }
         }
       }
 

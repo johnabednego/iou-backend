@@ -67,13 +67,36 @@ class User extends Model {
       if (typeof ldapEntry.ou === 'string' && ldapEntry.ou.length) return ldapEntry.ou;
       return null;
     })();
-    const department = departmentFromAttribute || extractDepartmentFromDn(ldapDn);
+    const rawLdapDepartment = departmentFromAttribute || extractDepartmentFromDn(ldapDn);
+    let department = rawLdapDepartment;
+
+    if (rawLdapDepartment) {
+      try {
+        const Department = require('./Department');
+        const allDepts = await Department.findAll({ where: { is_active: true } });
+        const cleanLdapDept = rawLdapDepartment.trim().toLowerCase();
+
+        // 1. Direct name match
+        const directMatch = allDepts.find(d => d.name.trim().toLowerCase() === cleanLdapDept);
+        if (directMatch) {
+          department = directMatch.name;
+        } else {
+          // 2. Alias match
+          const aliasMatch = allDepts.find(d => {
+            if (!d.ldap_aliases) return false;
+            const aliases = d.ldap_aliases.split(',').map(a => a.trim().toLowerCase());
+            return aliases.includes(cleanLdapDept);
+          });
+          if (aliasMatch) {
+            department = aliasMatch.name;
+          }
+        }
+      } catch (_) {}
+    }
 
     // Manager: try to take friendly attribute if available; otherwise parse CN from manager DN
     const managerFromAttribute = (() => {
       if (!ldapEntry) return null;
-      // some LDAPs return manager as DN string (e.g. "CN=Foo Bar,...")
-      // some may return managerDisplayName or managerName etc. Check common possibilities.
       if (Array.isArray(ldapEntry.manager) && ldapEntry.manager.length) return String(ldapEntry.manager[0]);
       if (typeof ldapEntry.manager === 'string' && ldapEntry.manager.length) return String(ldapEntry.manager);
       if (Array.isArray(ldapEntry.managerDisplayName) && ldapEntry.managerDisplayName.length) return String(ldapEntry.managerDisplayName[0]);
@@ -83,19 +106,14 @@ class User extends Model {
       return null;
     })();
 
-// managerFromAttribute may be a DN; extract CN if it looks like a DN
     let manager = null;
     if (managerFromAttribute) {
-      // If managerFromAttribute looks like a DN (contains 'CN='), extract CN
       if (/CN=/i.test(managerFromAttribute)) {
         manager = extractCnFromDn(managerFromAttribute);
       } else {
         manager = managerFromAttribute;
       }
     } else {
-      // fallback: sometimes LDAP provides manager DN in other properties, or none - try to look in ldapEntry.manager (already done),
-      // otherwise if we have a manager DN somewhere else (rare), we could parse.
-      // If ldapEntry.manager is a DN-like value, extract CN
       if (ldapEntry && ldapEntry.manager && typeof ldapEntry.manager === 'string') {
         manager = extractCnFromDn(ldapEntry.manager) || ldapEntry.manager;
       } else {
@@ -103,7 +121,6 @@ class User extends Model {
       }
     }
 
-    // If manager is still a DN string (unexpected), attempt CN extraction once more
     if (manager && typeof manager === 'string' && /CN=/i.test(manager)) {
       const cn = extractCnFromDn(manager);
       if (cn) manager = cn;
@@ -133,11 +150,14 @@ class User extends Model {
     const lastSynced = user.last_synced_at ? new Date(user.last_synced_at) : null;
     const stale = !lastSynced || (now - lastSynced) > forceSyncMs;
 
+    // Don't overwrite an existing assigned department if LDAP returns null
+    const targetDepartment = department || user.department;
+
     const needsFieldUpdate =
       (email && user.email !== email) ||
       (displayName && user.display_name !== displayName) ||
       (ldapDn && user.ldap_dn !== ldapDn) ||
-      (department && user.department !== department) ||
+      (targetDepartment && user.department !== targetDepartment) ||
       (manager && user.manager !== manager);
 
     const oldMeta = user.metadata ? JSON.stringify(user.metadata) : null;
@@ -149,7 +169,7 @@ class User extends Model {
       if (email && user.email !== email) changed.email = email;
       if (displayName && user.display_name !== displayName) changed.display_name = displayName;
       if (ldapDn && user.ldap_dn !== ldapDn) changed.ldap_dn = ldapDn;
-      if (typeof department !== 'undefined' && user.department !== department) changed.department = department;
+      if (targetDepartment && user.department !== targetDepartment) changed.department = targetDepartment;
       if (typeof manager !== 'undefined' && user.manager !== manager) changed.manager = manager;
       changed.metadata = ldapEntry;
       changed.last_synced_at = now;
