@@ -354,7 +354,12 @@ exports.assignExpenseApprovers = [
 
       if (!Array.isArray(approvers) || approvers.length === 0) {
         await t.rollback();
-        return res.status(400).json({ message: 'At least one approver is required' });
+        return res.status(400).json({ message: 'At least two approvers are required for expense approval' });
+      }
+
+      if (approvers.length < 2) {
+        await t.rollback();
+        return res.status(400).json({ message: 'Expense approval requires a minimum of two approvers' });
       }
 
       // Validation: no duplicate approver_id
