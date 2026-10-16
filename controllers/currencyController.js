@@ -80,9 +80,15 @@ exports.createCurrency = [
       }
 
       const { code, name, symbol } = req.body;
-      if (!code || !name) return res.status(400).json({ message: 'code and name are required' });
+      if (!code || !name) return res.status(400).json({ message: 'Currency code and name are required' });
+      if (!symbol || !symbol.trim()) return res.status(400).json({ message: 'Currency symbol is required (e.g. $, €, ₵, £)' });
 
       const upperCode = code.toUpperCase().trim();
+
+      // Validate: ISO 4217 currency codes must be exactly 3 uppercase letters
+      if (!/^[A-Z]{3}$/.test(upperCode)) {
+        return res.status(400).json({ message: 'Currency code must be exactly 3 letters (e.g. GHS, USD, EUR)' });
+      }
 
       // Check if currency already exists (might be soft-deleted)
       const existing = await Currency.findOne({ where: { code: upperCode } });
