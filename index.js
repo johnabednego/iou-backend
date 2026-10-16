@@ -27,8 +27,20 @@ const setupSwaggerDocs = require('./config/swagger');
 
 
 const app = express();
+
+// Build CORS allowed origins — include Smart Workplace frontend for SSO
+const corsOrigins = [
+  'http://localhost:3002',
+  'http://172.20.24.134:3002',
+  'http://mpslocappsvr.mpsgh.com:3002',
+];
+// If SWP_API_URL is set, also allow the SWP origin (for cross-origin SSO)
+if (process.env.SWP_API_URL) {
+  corsOrigins.push(process.env.SWP_API_URL);
+}
+
 app.use(cors({
-  origin: ['http://localhost:3002', 'http://172.20.24.134:3002', 'http://mpslocappsvr.mpsgh.com:3002'],
+  origin: corsOrigins,
   credentials: true
 }));
 app.use(bodyParser.json());

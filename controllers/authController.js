@@ -82,6 +82,82 @@ exports.login = async (req, res) => {
   }
 };
 
+// ── SSO Login via Smart Workplace token ───────────────────────────────────
+// Called when a user arrives from the Smart Workplace portal with a JWT
+// in the URL. We validate the token server-side against SWP's API, then
+// upsert the user locally and create a session — no password needed.
+exports.ssoLogin = async (req, res) => {
+  const { token } = req.body;
+
+  if (!token) {
+    return res.status(400).json({ message: 'SSO token is required' });
+  }
+
+  const swpApiUrl = process.env.SWP_API_URL;
+  if (!swpApiUrl) {
+    console.error('SWP_API_URL is not configured in .env');
+    return res.status(500).json({ message: 'SSO is not configured on this server' });
+  }
+
+  try {
+    // 1. Validate the token against Smart Workplace backend
+    const axios = require('axios');
+    const validateRes = await axios.post(`${swpApiUrl}/api/auth/validate-token`, { token }, {
+      timeout: 10000,
+      headers: { 'Content-Type': 'application/json' }
+    });
+
+    if (!validateRes.data || !validateRes.data.valid) {
+      return res.status(401).json({ message: 'Invalid or expired SSO token' });
+    }
+
+    const swpUser = validateRes.data.user;
+    if (!swpUser || !swpUser.username) {
+      return res.status(401).json({ message: 'SSO token does not contain user information' });
+    }
+
+    console.log(`🔑 SSO login via Smart Workplace: ${swpUser.username}`);
+
+    // 2. Build a synthetic LDAP-like entry from SWP token data so we can
+    //    reuse the existing User.upsertFromLdap() logic
+    const syntheticLdapEntry = {
+      sAMAccountName: swpUser.username,
+      name: swpUser.name || swpUser.username,
+      displayName: swpUser.name || swpUser.username,
+      givenName: swpUser.name ? swpUser.name.split(' ')[0] : swpUser.username,
+      userPrincipalName: swpUser.email || null,
+      mail: swpUser.email || null,
+      department: swpUser.department || null,
+      title: swpUser.title || null,
+    };
+
+    // 3. Upsert user into IOU's local database
+    const savedUser = await User.upsertFromLdap(syntheticLdapEntry);
+
+    // 4. Create a session — identical to what normal LDAP login does
+    req.session.user = {
+      id: savedUser.id,
+      username: savedUser.username,
+      display_name: savedUser.display_name,
+      email: savedUser.email,
+      department: savedUser.department,
+      manager: savedUser.manager,
+      ldap: syntheticLdapEntry
+    };
+
+    console.log(`   🎉 SSO login OK for ${swpUser.username}`);
+    return res.status(200).json({ message: 'SSO authentication successful', user: savedUser });
+  } catch (error) {
+    // Distinguish between SWP API rejection vs network errors
+    if (error.response) {
+      console.error('SSO token validation rejected:', error.response.status, error.response.data);
+      return res.status(401).json({ message: 'Invalid or expired SSO token' });
+    }
+    console.error('SSO login error:', error.message);
+    return res.status(500).json({ message: 'Failed to validate SSO token. Please try logging in manually.' });
+  }
+};
+
 exports.logout = (req, res) => {
   if (!req.session) return res.status(200).json({ message: 'No active session' });
   req.session.destroy((err) => {

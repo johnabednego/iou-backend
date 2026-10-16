@@ -1,5 +1,5 @@
 const express = require('express');
-const { login, logout } = require('../controllers/authController');
+const { login, logout, ssoLogin } = require('../controllers/authController');
 
 const router = express.Router();
 
@@ -37,6 +37,30 @@ const router = express.Router();
  *         description: Invalid credentials
  */
 router.post('/login', login);
+
+/**
+ * @swagger
+ * /auth/sso-login:
+ *   post:
+ *     summary: Authenticate via Smart Workplace SSO token
+ *     description: Validates a JWT token from the Smart Workplace portal and creates a local session.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               token:
+ *                 type: string
+ *                 description: JWT token from Smart Workplace
+ *     responses:
+ *       200:
+ *         description: SSO authentication successful
+ *       401:
+ *         description: Invalid or expired token
+ */
+router.post('/sso-login', ssoLogin);
 
 
 /**
