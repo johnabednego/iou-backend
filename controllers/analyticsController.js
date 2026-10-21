@@ -1,5 +1,6 @@
 // controllers/analyticsController.js
 const IOURequest = require('../models/IOURequest');
+const ExpenseSubmission = require('../models/ExpenseSubmission');
 const ReconciliationRecord = require('../models/ReconciliationRecord');
 const sequelize = require('../config/database');
 const { Op, fn, col, literal } = require('sequelize');
@@ -115,6 +116,7 @@ exports.getDashboardAnalytics = [
       }
 
       // ─── 3. Spending Breakdown (Overspent / Underspent / Exact) ───
+      // Now includes both counts AND total monetary amounts
       let spendingWhere = {};
       if (isPrivileged && !queryDept) {
         spendingWhere = {};
@@ -128,19 +130,20 @@ exports.getDashboardAnalytics = [
       }
 
       const reconciliations = await ReconciliationRecord.findAll({
-        attributes: ['diff_amount'],
+        attributes: ['diff_amount', 'estimated_amount', 'actual_amount'],
         where: spendingWhere,
         raw: true
       });
 
       let overspent = 0, underspent = 0, exact = 0;
+      let overspentTotal = 0, underspentTotal = 0;
       for (const r of reconciliations) {
         const diff = Number(r.diff_amount);
-        if (diff > 0) overspent++;
-        else if (diff < 0) underspent++;
+        if (diff > 0) { overspent++; overspentTotal += diff; }
+        else if (diff < 0) { underspent++; underspentTotal += Math.abs(diff); }
         else exact++;
       }
-      const spendingBreakdown = { overspent, underspent, exact };
+      const spendingBreakdown = { overspent, underspent, exact, overspentTotal, underspentTotal };
 
       // ─── 4. Status Distribution ───
       const statusDist = await IOURequest.findAll({
@@ -173,71 +176,64 @@ exports.getDashboardAnalytics = [
         count: parseInt(s.count)
       }));
 
-      // ─── 5. Approved Amounts by Currency (weekly, monthly, yearly, overall) ───
+      // ─── 5. Amount Spent by Currency (weekly, monthly, yearly, overall) ───
+      // Uses ACTUAL amount (from expense) for reconciled/redeemed IOUs,
+      // falls back to estimated_amount for IOUs still in progress.
       const approvedStatuses = ['APPROVED', 'APPROVED_FOR_DISBURSEMENT', 'DISBURSED', 'DISBURSEMENT_CONFIRMED',
         'EXPENSE_SUBMITTED', 'EXPENSE_PENDING_APPROVAL', 'RECONCILED', 'REDEEMED'];
+      const settledStatuses = ['RECONCILED', 'REDEEMED'];
 
-      // Overall
-      const overallAmounts = await IOURequest.findAll({
-        attributes: ['currency', [fn('SUM', col('estimated_amount')), 'total']],
-        where: { ...userFilter, status: { [Op.in]: approvedStatuses } },
-        group: ['currency'],
-        raw: true
-      });
+      // Helper: compute actual-spend-aware totals for a given date filter
+      async function computeSpentAmounts(dateFilter = {}) {
+        // Fetch all approved IOUs with their expense (if any)
+        const ious = await IOURequest.findAll({
+          attributes: ['id', 'currency', 'estimated_amount', 'status'],
+          where: { ...userFilter, status: { [Op.in]: approvedStatuses }, ...dateFilter },
+          include: [{
+            model: ExpenseSubmission,
+            as: 'expenses',
+            attributes: ['actual_amount'],
+            required: false
+          }]
+        });
+
+        const map = {};
+        for (const iou of ious) {
+          const cur = iou.currency || 'GHS';
+          const expense = iou.expenses && iou.expenses[0];
+          const isSettled = settledStatuses.includes(iou.status);
+          // Use actual spent for settled IOUs, estimated for in-progress
+          const amount = (isSettled && expense && expense.actual_amount != null)
+            ? Number(expense.actual_amount)
+            : Number(iou.estimated_amount) || 0;
+          map[cur] = (map[cur] || 0) + amount;
+        }
+        return map;
+      }
 
       // This week
       const weekStart = new Date(now);
       weekStart.setDate(now.getDate() - now.getDay());
       weekStart.setHours(0, 0, 0, 0);
 
-      const weeklyAmounts = await IOURequest.findAll({
-        attributes: ['currency', [fn('SUM', col('estimated_amount')), 'total']],
-        where: {
-          ...userFilter,
-          status: { [Op.in]: approvedStatuses },
-          created_at: { [Op.gte]: weekStart }
-        },
-        group: ['currency'],
-        raw: true
-      });
-
       // This month
       const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-      const monthlyAmounts = await IOURequest.findAll({
-        attributes: ['currency', [fn('SUM', col('estimated_amount')), 'total']],
-        where: {
-          ...userFilter,
-          status: { [Op.in]: approvedStatuses },
-          created_at: { [Op.gte]: monthStart }
-        },
-        group: ['currency'],
-        raw: true
-      });
 
       // This year
       const yearStart = new Date(now.getFullYear(), 0, 1);
-      const yearlyAmounts = await IOURequest.findAll({
-        attributes: ['currency', [fn('SUM', col('estimated_amount')), 'total']],
-        where: {
-          ...userFilter,
-          status: { [Op.in]: approvedStatuses },
-          created_at: { [Op.gte]: yearStart }
-        },
-        group: ['currency'],
-        raw: true
-      });
 
-      const toMap = (arr) => {
-        const m = {};
-        for (const r of arr) m[r.currency] = Number(r.total) || 0;
-        return m;
-      };
+      const [weeklyMap, monthlyMap, yearlyMap, overallMap] = await Promise.all([
+        computeSpentAmounts({ created_at: { [Op.gte]: weekStart } }),
+        computeSpentAmounts({ created_at: { [Op.gte]: monthStart } }),
+        computeSpentAmounts({ created_at: { [Op.gte]: yearStart } }),
+        computeSpentAmounts({})
+      ]);
 
       const approvedAmounts = {
-        weekly: toMap(weeklyAmounts),
-        monthly: toMap(monthlyAmounts),
-        yearly: toMap(yearlyAmounts),
-        overall: toMap(overallAmounts)
+        weekly: weeklyMap,
+        monthly: monthlyMap,
+        yearly: yearlyMap,
+        overall: overallMap
       };
 
       // ─── 6. Pending total (ALL pending) ───
@@ -257,28 +253,17 @@ exports.getDashboardAnalytics = [
         raw: true
       });
 
-      // ─── 8. Monthly approved amounts chart (last 12 months per currency) ───
+      // ─── 8. Monthly spending chart (last 12 months per currency) ───
+      // Uses actual amounts for settled IOUs, estimated for in-progress
       const monthlyApprovedChart = [];
       for (let m = 0; m < 12; m++) {
         const mStart = new Date(twelveMonthsAgo.getFullYear(), twelveMonthsAgo.getMonth() + m, 1);
         const mEnd = new Date(mStart.getFullYear(), mStart.getMonth() + 1, 0, 23, 59, 59, 999);
         const mLabel = mStart.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
 
-        const amounts = await IOURequest.findAll({
-          attributes: ['currency', [fn('SUM', col('estimated_amount')), 'total']],
-          where: {
-            ...userFilter,
-            status: { [Op.in]: approvedStatuses },
-            created_at: { [Op.between]: [mStart, mEnd] }
-          },
-          group: ['currency'],
-          raw: true
-        });
+        const mAmounts = await computeSpentAmounts({ created_at: { [Op.between]: [mStart, mEnd] } });
 
-        const entry = { month: mLabel };
-        for (const a of amounts) {
-          entry[a.currency] = Number(a.total) || 0;
-        }
+        const entry = { month: mLabel, ...mAmounts };
         monthlyApprovedChart.push(entry);
       }
 
