@@ -14,7 +14,7 @@ const containerName = process.env.AZURE_STORAGE_CONTAINER || 'ious-attachments';
 const blobBaseUrlFromEnv = process.env.AZURE_BLOB_URL || null;
 
 // blobBaseUrl: canonical base URL (no trailing slash)
-const blobBaseUrl = (blobBaseUrlFromEnv && blobBaseUrlFromEnv.split('?')[0]) || (accountName ? `https://${accountName}.blob.core.windows.net` : null);
+const blobBaseUrl = (accountName ? `https://${accountName}.blob.core.windows.net` : null) || (blobBaseUrlFromEnv && blobBaseUrlFromEnv.split('?')[0]);
 
 // warn if nothing configured
 if (!connectionString && !(accountName && accountKey) && !blobBaseUrlFromEnv) {
@@ -24,16 +24,22 @@ if (!connectionString && !(accountName && accountKey) && !blobBaseUrlFromEnv) {
 let blobServiceClient = null;
 let sharedKeyCredential = null;
 
+if (accountName && accountKey) {
+  try {
+    sharedKeyCredential = new StorageSharedKeyCredential(accountName, accountKey);
+  } catch (e) {
+    console.warn('Failed to create StorageSharedKeyCredential from accountName/accountKey:', e.message || e);
+  }
+}
+
 if (connectionString) {
   try {
     blobServiceClient = BlobServiceClient.fromConnectionString(connectionString);
-    // do not set sharedKeyCredential here (we may not have accountKey)
   } catch (e) {
     console.warn('Invalid AZURE_STORAGE_CONNECTION_STRING; cannot create BlobServiceClient from connection string.', e.message || e);
   }
-} else if (accountName && accountKey) {
+} else if (sharedKeyCredential) {
   try {
-    sharedKeyCredential = new StorageSharedKeyCredential(accountName, accountKey);
     blobServiceClient = new BlobServiceClient(`https://${accountName}.blob.core.windows.net`, sharedKeyCredential);
   } catch (e) {
     console.warn('Failed to create BlobServiceClient from accountName/accountKey:', e.message || e);
