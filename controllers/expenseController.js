@@ -106,7 +106,7 @@ exports.submitExpense = [
 
       return res.json({ message: 'Expense submitted successfully. Awaiting finance approval.', expense });
     } catch (err) {
-      try { await t.rollback(); } catch (_) {}
+      try { await t.rollback(); } catch (_) { }
       console.error('submitExpense error:', err.message);
       const msg = err.name === 'SequelizeDatabaseError'
         ? 'Database error while submitting expense. Please check your data and try again.'
@@ -207,7 +207,7 @@ exports.updateExpense = [
 
       return res.json({ message: 'Expense updated and re-submitted', expense });
     } catch (err) {
-      try { await t.rollback(); } catch (_) {}
+      try { await t.rollback(); } catch (_) { }
       console.error('updateExpense error:', err.message);
       return res.status(500).json({ message: 'Error updating expense' });
     }
@@ -324,7 +324,7 @@ exports.rejectExpense = [
 
       return res.json({ message: 'Expense rejected and returned to requester', expense });
     } catch (err) {
-      try { await t.rollback(); } catch (_) {}
+      try { await t.rollback(); } catch (_) { }
       console.error('rejectExpense error:', err.message);
       return res.status(500).json({ message: 'Error rejecting expense' });
     }
@@ -476,7 +476,7 @@ exports.assignExpenseApprovers = [
 
       return res.json({ message: 'Expense approvers assigned', approvers: created });
     } catch (err) {
-      try { await t.rollback(); } catch (_) {}
+      try { await t.rollback(); } catch (_) { }
       console.error('assignExpenseApprovers error:', err);
       return res.status(500).json({ message: 'Error assigning expense approvers' });
     }
@@ -638,7 +638,7 @@ exports.decideExpenseApproval = [
 
       return res.json({ message: 'Expense approval decision recorded', approval, iou_status: iou.status });
     } catch (err) {
-      try { await t.rollback(); } catch (_) {}
+      try { await t.rollback(); } catch (_) { }
       console.error('decideExpenseApproval error:', err);
       return res.status(500).json({ message: 'Error processing expense approval' });
     }
@@ -708,8 +708,14 @@ exports.reconcile = [
         let txNotes = '';
 
         if (diff > 0) {
-          // Overspent: actual > estimated - deduct the overspent difference (cannot drop below 0.00)
-          newBalance = Math.max(0, currentAvailable - diff);
+          // Overspent: actual > estimated - cashier must reimburse the employee
+          if (currentAvailable < diff) {
+            await t.rollback();
+            return res.status(400).json({
+              message: `Insufficient ${iouCurrency} funds to reconcile overspent IOU (${diff.toFixed(2)} ${iouCurrency} required, but only ${currentAvailable.toFixed(2)} available). Please update the fund balance before completing reconciliation.`
+            });
+          }
+          newBalance = currentAvailable - diff;
           txType = 'RECONCILIATION_DEBIT';
           txNotes = `Overspent reconciliation for IOU ${iou.request_number}: additional ${diff.toFixed(2)} ${iouCurrency} deducted`;
         } else {
@@ -720,12 +726,15 @@ exports.reconcile = [
           txNotes = `Underspent reconciliation for IOU ${iou.request_number}: ${creditAmount.toFixed(2)} ${iouCurrency} credited back`;
         }
 
-        if (fundBalance) {
-          await fundBalance.update({
-            available_amount: newBalance,
-            last_updated_by: actor.id
-          }, { transaction: t });
-        }
+        let [fundBalRecord] = await FundBalance.findOrCreate({
+          where: { currency: iouCurrency },
+          defaults: { available_amount: newBalance, last_updated_by: actor.id },
+          transaction: t
+        });
+        await fundBalRecord.update({
+          available_amount: newBalance,
+          last_updated_by: actor.id
+        }, { transaction: t });
 
         await FundTransaction.create({
           currency: iouCurrency,
@@ -771,7 +780,7 @@ exports.reconcile = [
 
       return res.json({ message: 'IOU reconciled successfully', record });
     } catch (err) {
-      try { await t.rollback(); } catch (_) {}
+      try { await t.rollback(); } catch (_) { }
       console.error('reconcile error:', err.name, err.message);
       const msg = err.name === 'SequelizeDatabaseError'
         ? 'Database error during reconciliation. The reconciliation table may need updating. Please contact admin.'
@@ -939,7 +948,7 @@ exports.redeemIOU = [
         return res.json({ message: 'Reconciliation confirmed by cashier. IOU marked as redeemed.', reconciliation });
       }
     } catch (err) {
-      try { await t.rollback(); } catch (_) {}
+      try { await t.rollback(); } catch (_) { }
       console.error('redeemIOU error details:', err);
       const userMsg = err.message || 'Error confirming reconciliation. Please try again.';
       return res.status(500).json({ message: userMsg });
