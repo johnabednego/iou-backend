@@ -11,6 +11,7 @@ const {
   confirmApproval,
   disburse,
   confirmDisbursement,
+  completeDirectExpense,
   getDisbursements,
   cashierRejectDE,
   cashierReturnDE
@@ -29,9 +30,11 @@ router.post('/:id/submit', isAuthenticated, submitDirectExpense);
 router.post('/:id/assign-approvers', isAuthenticated, requireCashierOrAdmin, assignApprovers);
 router.post('/:id/confirm-approval', isAuthenticated, requireCashierOrAdmin, confirmApproval);
 
-// Disbursement
+// Disbursement & Completion
 router.post('/:id/disburse', isAuthenticated, requireCashierOrAdmin, disburse);
+router.post('/:id/confirm-receipt', isAuthenticated, confirmDisbursement);
 router.post('/:id/confirm-disbursement', isAuthenticated, confirmDisbursement);
+router.post('/:id/complete', isAuthenticated, requireCashierOrAdmin, completeDirectExpense);
 router.get('/:id/disbursements', isAuthenticated, getDisbursements);
 
 // Cashier reject/return

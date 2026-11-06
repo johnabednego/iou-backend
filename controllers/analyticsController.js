@@ -309,6 +309,7 @@ exports.getDashboardAnalytics = [
           'PENDING': 'Pending',
           'APPROVED_FOR_DISBURSEMENT': 'For Disbursement',
           'DISBURSED': 'Disbursed',
+          'DISBURSEMENT_CONFIRMED': 'Funds Confirmed',
           'COMPLETED': 'Completed',
           'RETURNED': 'Returned',
           'REJECTED': 'Rejected'
@@ -345,7 +346,7 @@ exports.getDashboardAnalytics = [
             .filter(r => ['PENDING', 'PENDING_HOD_ASSIGNMENT'].includes(r.status))
             .reduce((sum, r) => sum + parseInt(r.count), 0);
           const approved = deCounts
-            .filter(r => ['APPROVED_FOR_DISBURSEMENT', 'DISBURSED', 'COMPLETED'].includes(r.status))
+            .filter(r => ['APPROVED_FOR_DISBURSEMENT', 'DISBURSED', 'DISBURSEMENT_CONFIRMED', 'COMPLETED'].includes(r.status))
             .reduce((sum, r) => sum + parseInt(r.count), 0);
           const rejected = deCounts
             .filter(r => ['REJECTED'].includes(r.status))
@@ -377,7 +378,7 @@ exports.getDashboardAnalytics = [
         }));
 
         // DE: Approved/Disbursed amounts by currency
-        const deApprovedStatuses = ['APPROVED_FOR_DISBURSEMENT', 'DISBURSED', 'COMPLETED'];
+        const deApprovedStatuses = ['APPROVED_FOR_DISBURSEMENT', 'DISBURSED', 'DISBURSEMENT_CONFIRMED', 'COMPLETED'];
         async function computeDeAmounts(dateFilter = {}) {
           const des = await DirectExpenseRequest.findAll({
             attributes: ['id', 'currency', 'amount', 'status'],

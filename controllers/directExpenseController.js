@@ -787,6 +787,10 @@ exports.disburse = [
 
       const { amount, payment_method, payment_reference, notes, ifs_voucher_number } = req.body;
       if (!amount) { await t.rollback(); return res.status(400).json({ message: 'amount is required' }); }
+      if (!ifs_voucher_number || !ifs_voucher_number.trim()) {
+        await t.rollback();
+        return res.status(400).json({ message: 'IFS Voucher Number is required to disburse Direct Expense funds.' });
+      }
 
       const disbursement = await Disbursement.create({
         direct_expense_id: de.id,
@@ -829,10 +833,10 @@ exports.disburse = [
         notes: `Disbursement for Direct Expense ${de.request_number}`
       }, { transaction: t });
 
-      const deUpdates = { status: 'DISBURSED' };
-      if (ifs_voucher_number && ifs_voucher_number.trim()) {
-        deUpdates.ifs_voucher_number = ifs_voucher_number.trim();
-      }
+      const deUpdates = {
+        status: 'DISBURSED',
+        ifs_voucher_number: ifs_voucher_number.trim()
+      };
       await de.update(deUpdates, { transaction: t });
 
       await auditService.log({
@@ -873,9 +877,9 @@ exports.disburse = [
 ];
 
 /**
- * POST /api/direct-expenses/:id/confirm-disbursement
- * User confirms receipt of disbursed funds.
- * Changes status from DISBURSED -> COMPLETED (final state for Direct Expense)
+ * POST /api/direct-expenses/:id/confirm-disbursement (or /confirm-receipt)
+ * Requester confirms receipt of disbursed funds.
+ * Changes status from DISBURSED -> DISBURSEMENT_CONFIRMED
  */
 exports.confirmDisbursement = [
   async (req, res) => {
@@ -885,27 +889,19 @@ exports.confirmDisbursement = [
       if (!actor) { await t.rollback(); return res.status(401).json({ message: 'Not authenticated' }); }
 
       const { id } = req.params;
-      const { ifs_voucher_number } = req.body || {};
 
       const de = await DirectExpenseRequest.findByPk(id, { transaction: t });
       if (!de) { await t.rollback(); return res.status(404).json({ message: 'Direct Expense not found' }); }
 
-      const voucherNumber = (ifs_voucher_number && ifs_voucher_number.trim()) || de.ifs_voucher_number;
-      if (!voucherNumber) {
-        await t.rollback();
-        return res.status(400).json({ message: 'IFS Voucher Number is required to complete the Direct Expense.' });
-      }
-
       const isOwner = de.requester_id === actor.id;
-      const isCashier = actor.is_admin || actor.role === 'cashier';
-      if (!isOwner && !isCashier) {
+      if (!isOwner && !actor.is_admin) {
         await t.rollback();
-        return res.status(403).json({ message: 'Only the requester, cashier, or admin can confirm disbursement receipt' });
+        return res.status(403).json({ message: 'Only the requester (or admin) can confirm receipt of funds' });
       }
 
       if (de.status !== 'DISBURSED') {
         await t.rollback();
-        return res.status(400).json({ message: `Cannot confirm disbursement for Direct Expense in status ${de.status}. Must be DISBURSED.` });
+        return res.status(400).json({ message: `Cannot confirm receipt for Direct Expense in status "${de.status}". Must be DISBURSED.` });
       }
 
       const disbursement = await Disbursement.findOne({
@@ -921,26 +917,25 @@ exports.confirmDisbursement = [
         }, { transaction: t });
       }
 
-      // COMPLETED is the final status for Direct Expense (no expense submission or reconciliation)
-      await de.update({ status: 'COMPLETED', ifs_voucher_number: voucherNumber.trim() }, { transaction: t });
+      await de.update({ status: 'DISBURSEMENT_CONFIRMED' }, { transaction: t });
 
       await auditService.log({
         actorId: actor.id,
         actorName: actor.display_name || actor.username,
-        action: 'CONFIRM_DISBURSEMENT',
+        action: 'CONFIRM_DISBURSEMENT_RECEIPT',
         entity: 'DIRECT_EXPENSE',
         entityId: de.id,
-        details: { disbursement_id: disbursement?.id, ifs_voucher_number: voucherNumber.trim() }
+        details: { disbursement_id: disbursement?.id }
       }, { transaction: t });
 
-      // Notify cashiers
+      // Notify cashiers that funds receipt was confirmed and request is ready for final completion
       const cashiers = await User.findAll({ where: { role: 'cashier', is_active: true }, transaction: t });
       const emailsToSend = [];
       for (const c of cashiers) {
         const note = await notificationService.createNotification({
           target_user_id: c.id,
-          title: `Direct Expense Completed: ${de.request_number}`,
-          body: `${actor.display_name || actor.username} confirmed receipt of funds for Direct Expense ${de.request_number}. This request is now completed.`,
+          title: `Funds Receipt Confirmed: ${de.request_number}`,
+          body: `${actor.display_name || actor.username} confirmed receipt of funds for Direct Expense ${de.request_number}. Please finalize and mark as completed.`,
           link: `/direct-expenses/${de.id}`,
           entity: 'DIRECT_EXPENSE',
           entity_id: de.id
@@ -960,11 +955,90 @@ exports.confirmDisbursement = [
         }
       })();
 
-      return res.json({ message: 'Direct Expense completed', de_status: 'COMPLETED' });
+      return res.json({ message: 'Receipt of funds confirmed successfully', de_status: 'DISBURSEMENT_CONFIRMED' });
     } catch (err) {
       try { await t.rollback(); } catch (_) { }
       console.error('confirmDisbursement (DE) error', err);
       return res.status(500).json({ message: 'Error confirming disbursement' });
+    }
+  }
+];
+
+/**
+ * POST /api/direct-expenses/:id/complete
+ * Cashier marks Direct Expense as COMPLETED after requester has confirmed funds receipt.
+ * Changes status from DISBURSEMENT_CONFIRMED -> COMPLETED
+ * IFS Voucher Number is strictly required.
+ */
+exports.completeDirectExpense = [
+  async (req, res) => {
+    const t = await sequelize.transaction();
+    try {
+      const actor = req.currentUser;
+      if (!actor) { await t.rollback(); return res.status(401).json({ message: 'Not authenticated' }); }
+      if (!actor.is_admin && actor.role !== 'cashier') {
+        await t.rollback();
+        return res.status(403).json({ message: 'Only cashier or admin can complete a Direct Expense' });
+      }
+
+      const { id } = req.params;
+      const { ifs_voucher_number } = req.body || {};
+
+      const de = await DirectExpenseRequest.findByPk(id, { transaction: t });
+      if (!de) { await t.rollback(); return res.status(404).json({ message: 'Direct Expense not found' }); }
+
+      if (de.status === 'DISBURSED') {
+        await t.rollback();
+        return res.status(400).json({ message: 'Cannot complete Direct Expense until the requester has confirmed receipt of funds.' });
+      }
+
+      if (de.status !== 'DISBURSEMENT_CONFIRMED') {
+        await t.rollback();
+        return res.status(400).json({ message: `Cannot complete Direct Expense in status "${de.status}". Must be DISBURSEMENT_CONFIRMED.` });
+      }
+
+      const voucherNumber = (ifs_voucher_number && ifs_voucher_number.trim()) || de.ifs_voucher_number;
+      if (!voucherNumber) {
+        await t.rollback();
+        return res.status(400).json({ message: 'IFS Voucher Number is required to complete the Direct Expense.' });
+      }
+
+      await de.update({ status: 'COMPLETED', ifs_voucher_number: voucherNumber.trim() }, { transaction: t });
+
+      await auditService.log({
+        actorId: actor.id,
+        actorName: actor.display_name || actor.username,
+        action: 'COMPLETE_DIRECT_EXPENSE',
+        entity: 'DIRECT_EXPENSE',
+        entityId: de.id,
+        details: { ifs_voucher_number: voucherNumber.trim() }
+      }, { transaction: t });
+
+      // Notify requester that Direct Expense is now completed
+      const note = await notificationService.createNotification({
+        target_user_id: de.requester_id,
+        title: `Direct Expense Completed: ${de.request_number}`,
+        body: `Your Direct Expense ${de.request_number} has been completed by ${actor.display_name || actor.username}. IFS Voucher: ${voucherNumber.trim()}.`,
+        link: `/direct-expenses/${de.id}`,
+        entity: 'DIRECT_EXPENSE',
+        entity_id: de.id
+      }, { transaction: t });
+
+      await t.commit();
+
+      (async () => {
+        try {
+          await emailService.sendNotificationEmailForUser(de.requester_id, note.title, note.body, note.link);
+        } catch (err) {
+          console.error('Email send error for completeDirectExpense', err);
+        }
+      })();
+
+      return res.json({ message: 'Direct Expense completed successfully', de_status: 'COMPLETED' });
+    } catch (err) {
+      try { await t.rollback(); } catch (_) { }
+      console.error('completeDirectExpense error', err);
+      return res.status(500).json({ message: 'Error completing Direct Expense' });
     }
   }
 ];
