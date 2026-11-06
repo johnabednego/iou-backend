@@ -25,7 +25,7 @@ exports.exportRedeemed = [
         });
       }
 
-      // Build query — respect all dashboard filters
+      // Build query - respect all dashboard filters
       const where = {};
 
       // Status filter

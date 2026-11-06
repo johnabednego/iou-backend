@@ -22,13 +22,14 @@ const exportRoutes = require('./routes/exportRoutes');
 const currencyRoutes = require('./routes/currencyRoutes');
 const fundRoutes = require('./routes/fundRoutes');
 const analyticsRoutes = require('./routes/analyticsRoutes');
+const directExpenseRoutes = require('./routes/directExpenseRoutes');
 
 const setupSwaggerDocs = require('./config/swagger');
 
 
 const app = express();
 
-// Build CORS allowed origins — include Smart Workplace frontend for SSO
+// Build CORS allowed origins - include Smart Workplace frontend for SSO
 const corsOrigins = [
   'http://localhost:3002',
   'http://172.20.24.134:3002',
@@ -69,6 +70,7 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/currencies', currencyRoutes);
 app.use('/api/funds', fundRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/direct-expenses', directExpenseRoutes);
 
 // Setup Swagger Docs
 setupSwaggerDocs(app);

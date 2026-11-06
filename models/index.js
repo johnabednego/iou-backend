@@ -19,6 +19,8 @@ let AppSetting = null;
 let Currency = null;
 let FundBalance = null;
 let FundTransaction = null;
+let DirectExpenseRequest = null;
+let DirectExpenseAttachment = null;
 
 try { IOUAttachment = require('./IOUAttachment'); } catch (e) { IOUAttachment = null; }
 try { Notification = require('./Notification'); } catch (e) { Notification = null; }
@@ -32,6 +34,8 @@ try { AppSetting = require('./AppSetting'); } catch (e) { AppSetting = null; }
 try { Currency = require('./Currency'); } catch (e) { Currency = null; }
 try { FundBalance = require('./FundBalance'); } catch (e) { FundBalance = null; }
 try { FundTransaction = require('./FundTransaction'); } catch (e) { FundTransaction = null; }
+try { DirectExpenseRequest = require('./DirectExpenseRequest'); } catch (e) { DirectExpenseRequest = null; }
+try { DirectExpenseAttachment = require('./DirectExpenseAttachment'); } catch (e) { DirectExpenseAttachment = null; }
 
 // --------------------
 // Define associations
@@ -129,6 +133,30 @@ if (FundTransaction && User) {
   FundTransaction.belongsTo(User, { foreignKey: 'performed_by', as: 'performer' });
 }
 
+// ─── Direct Expense Associations ───
+if (DirectExpenseRequest && User) {
+  DirectExpenseRequest.belongsTo(User, { foreignKey: 'requester_id', as: 'requester' });
+  User.hasMany(DirectExpenseRequest, { foreignKey: 'requester_id', as: 'directExpenses' });
+}
+
+if (DirectExpenseAttachment && DirectExpenseRequest) {
+  DirectExpenseAttachment.belongsTo(DirectExpenseRequest, { foreignKey: 'direct_expense_id', as: 'directExpense' });
+  DirectExpenseRequest.hasMany(DirectExpenseAttachment, { foreignKey: 'direct_expense_id', as: 'attachments' });
+}
+if (DirectExpenseAttachment && User) {
+  DirectExpenseAttachment.belongsTo(User, { foreignKey: 'uploaded_by', as: 'uploader' });
+}
+
+if (Approval && DirectExpenseRequest) {
+  Approval.belongsTo(DirectExpenseRequest, { foreignKey: 'direct_expense_id', as: 'directExpense' });
+  DirectExpenseRequest.hasMany(Approval, { foreignKey: 'direct_expense_id', as: 'approvals' });
+}
+
+if (Disbursement && DirectExpenseRequest) {
+  Disbursement.belongsTo(DirectExpenseRequest, { foreignKey: 'direct_expense_id', as: 'directExpense' });
+  DirectExpenseRequest.hasMany(Disbursement, { foreignKey: 'direct_expense_id', as: 'disbursements' });
+}
+
 // --------------------
 // Export everything
 // --------------------
@@ -148,5 +176,7 @@ module.exports = {
   AppSetting,
   Currency,
   FundBalance,
-  FundTransaction
+  FundTransaction,
+  DirectExpenseRequest,
+  DirectExpenseAttachment
 };

@@ -12,7 +12,11 @@ Disbursement.init({
   },
   iou_id: {
     type: DataTypes.UUID,
-    allowNull: false,
+    allowNull: true,
+  },
+  direct_expense_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
   },
   cashier_id: {
     type: DataTypes.UUID,

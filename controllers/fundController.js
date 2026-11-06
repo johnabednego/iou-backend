@@ -152,7 +152,7 @@ exports.updateFundBalance = [
 /**
  * GET /api/funds/check/:currency/:amount
  * Check if sufficient funds available (any authenticated user)
- * Returns { sufficient: boolean } — NEVER reveals actual balance amount
+ * Returns { sufficient: boolean } - NEVER reveals actual balance amount
  */
 exports.checkFunds = [
   async (req, res) => {

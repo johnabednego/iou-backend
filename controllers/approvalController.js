@@ -8,6 +8,8 @@ const notificationService = require('../services/notificationService');
 const emailService = require('../services/emailService');
 const User = require('../models/User');
 const ExpenseSubmission = require('../models/ExpenseSubmission');
+let DirectExpenseRequest;
+try { DirectExpenseRequest = require('../models/DirectExpenseRequest'); } catch (_) {}
 
 /**
  * PUT /api/approvals/:id
@@ -43,9 +45,12 @@ exports.decideApproval = [
       }
 
       // Prevent approving out of sequence: there must be no earlier pending approvals of the same type
+      const seqWhereBase = approval.approval_type === 'direct_expense'
+        ? { direct_expense_id: approval.direct_expense_id }
+        : { iou_id: approval.iou_id };
       const earlierPending = await Approval.findOne({
         where: {
-          iou_id: approval.iou_id,
+          ...seqWhereBase,
           approval_type: approval.approval_type || 'iou',
           decision: 'PENDING',
           step_order: { [Op.lt]: approval.step_order }
@@ -69,9 +74,12 @@ exports.decideApproval = [
       // This prevents any subsequent approver from seeing or acting on this IOU
       // while it is returned/rejected. Fresh records are created on re-submission.
       if (decision === 'REJECTED' || decision === 'RETURNED') {
+        const cancelWhereBase = approval.approval_type === 'direct_expense'
+          ? { direct_expense_id: approval.direct_expense_id }
+          : { iou_id: approval.iou_id };
         await Approval.destroy({
           where: {
-            iou_id: approval.iou_id,
+            ...cancelWhereBase,
             approval_type: approval.approval_type || 'iou',
             decision: 'PENDING',
             step_order: { [Op.gt]: approval.step_order }
@@ -80,15 +88,38 @@ exports.decideApproval = [
         });
       }
 
-      // Load IOU
-      const iou = await IOURequest.findByPk(approval.iou_id, { transaction: t });
-      if (!iou) { await t.rollback(); return res.status(500).json({ message: 'Linked IOU not found' }); }
+      // Load the linked request (IOU or Direct Expense)
+      let iou = null;
+      let deReq = null;
+      let requestEntity, requestEntityId, requestNumber, requesterId, requestLink;
+
+      if (approval.approval_type === 'direct_expense' && DirectExpenseRequest) {
+        deReq = await DirectExpenseRequest.findByPk(approval.direct_expense_id, { transaction: t });
+        if (!deReq) { await t.rollback(); return res.status(500).json({ message: 'Linked Direct Expense not found' }); }
+        requestEntity = 'DIRECT_EXPENSE';
+        requestEntityId = deReq.id;
+        requestNumber = deReq.request_number;
+        requesterId = deReq.requester_id;
+        requestLink = `/direct-expenses/${deReq.id}`;
+        iou = deReq; // alias for shared logic below
+      } else {
+        iou = await IOURequest.findByPk(approval.iou_id, { transaction: t });
+        if (!iou) { await t.rollback(); return res.status(500).json({ message: 'Linked IOU not found' }); }
+        requestEntity = 'IOU';
+        requestEntityId = iou.id;
+        requestNumber = iou.request_number;
+        requesterId = iou.requester_id;
+        requestLink = `/ious/${iou.id}`;
+      }
 
       // Helper: get all previous approvers who already approved (for return/reject notifications)
       async function getPreviousApprovedUsers() {
+        const prevWhereBase = approval.approval_type === 'direct_expense'
+          ? { direct_expense_id: requestEntityId }
+          : { iou_id: requestEntityId };
         const previousApprovals = await Approval.findAll({
           where: {
-            iou_id: iou.id,
+            ...prevWhereBase,
             approval_type: approval.approval_type || 'iou',
             decision: 'APPROVED',
             id: { [Op.ne]: approval.id }
@@ -109,9 +140,9 @@ exports.decideApproval = [
             target_user_id: u.id,
             title,
             body,
-            link: `/ious/${iou.id}`,
-            entity: 'IOU',
-            entity_id: iou.id
+            link: requestLink,
+            entity: requestEntity,
+            entity_id: requestEntityId
           }, { transaction: t });
           emailsToSend.push({ note, target_user_id: u.id });
         }
@@ -126,52 +157,82 @@ exports.decideApproval = [
 
           // Notify requester
           const note = await notificationService.createNotification({
-            target_user_id: iou.requester_id,
-            title: `Expense Rejected: ${iou.request_number}`,
-            body: `Your expense for IOU ${iou.request_number} was rejected by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''} Please edit and re-submit.`,
-            link: `/ious/${iou.id}`,
-            entity: 'IOU',
-            entity_id: iou.id
+            target_user_id: requesterId,
+            title: `Expense Rejected: ${requestNumber}`,
+            body: `Your expense for IOU ${requestNumber} was rejected by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''} Please edit and re-submit.`,
+            link: requestLink,
+            entity: requestEntity,
+            entity_id: requestEntityId
           }, { transaction: t });
-          emailsToSend.push({ note, target_user_id: iou.requester_id });
+          emailsToSend.push({ note, target_user_id: requesterId });
 
           // Also notify cashiers
           await notifyCashiers(
-            `Expense Rejected: ${iou.request_number}`,
-            `Expense for IOU ${iou.request_number} was rejected by ${actor.display_name || actor.username}.`
+            `Expense Rejected: ${requestNumber}`,
+            `Expense for IOU ${requestNumber} was rejected by ${actor.display_name || actor.username}.`
+          );
+        } else if (approval.approval_type === 'direct_expense') {
+          await iou.update({ status: 'REJECTED' }, { transaction: t });
+
+          const note = await notificationService.createNotification({
+            target_user_id: requesterId,
+            title: `Direct Expense Rejected: ${requestNumber}`,
+            body: `Your Direct Expense ${requestNumber} was rejected by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''}`,
+            link: requestLink,
+            entity: requestEntity,
+            entity_id: requestEntityId
+          }, { transaction: t });
+          emailsToSend.push({ note, target_user_id: requesterId });
+
+          const prevApproverIds = await getPreviousApprovedUsers();
+          for (const uid of prevApproverIds) {
+            const pNote = await notificationService.createNotification({
+              target_user_id: uid,
+              title: `Direct Expense Rejected: ${requestNumber}`,
+              body: `Direct Expense ${requestNumber} which you approved has been rejected by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''}`,
+              link: requestLink,
+              entity: requestEntity,
+              entity_id: requestEntityId
+            }, { transaction: t });
+            emailsToSend.push({ note: pNote, target_user_id: uid });
+          }
+
+          await notifyCashiers(
+            `Direct Expense Rejected: ${requestNumber}`,
+            `Direct Expense ${requestNumber} was rejected by ${actor.display_name || actor.username}.`
           );
         } else {
           await iou.update({ status: 'REJECTED' }, { transaction: t });
 
           // Notify requester
           const note = await notificationService.createNotification({
-            target_user_id: iou.requester_id,
-            title: `IOU Rejected: ${iou.request_number}`,
-            body: `Your IOU ${iou.request_number} was rejected by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''}`,
-            link: `/ious/${iou.id}`,
-            entity: 'IOU',
-            entity_id: iou.id
+            target_user_id: requesterId,
+            title: `IOU Rejected: ${requestNumber}`,
+            body: `Your IOU ${requestNumber} was rejected by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''}`,
+            link: requestLink,
+            entity: requestEntity,
+            entity_id: requestEntityId
           }, { transaction: t });
-          emailsToSend.push({ note, target_user_id: iou.requester_id });
+          emailsToSend.push({ note, target_user_id: requesterId });
 
           // Notify all previous approvers who already approved
           const prevApproverIds = await getPreviousApprovedUsers();
           for (const uid of prevApproverIds) {
             const pNote = await notificationService.createNotification({
               target_user_id: uid,
-              title: `IOU Rejected: ${iou.request_number}`,
-              body: `IOU ${iou.request_number} which you approved has been rejected by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''}`,
-              link: `/ious/${iou.id}`,
-              entity: 'IOU',
-              entity_id: iou.id
+              title: `IOU Rejected: ${requestNumber}`,
+              body: `IOU ${requestNumber} which you approved has been rejected by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''}`,
+              link: requestLink,
+              entity: requestEntity,
+              entity_id: requestEntityId
             }, { transaction: t });
             emailsToSend.push({ note: pNote, target_user_id: uid });
           }
 
           // Also notify cashiers
           await notifyCashiers(
-            `IOU Rejected: ${iou.request_number}`,
-            `IOU ${iou.request_number} was rejected by ${actor.display_name || actor.username}.`
+            `IOU Rejected: ${requestNumber}`,
+            `IOU ${requestNumber} was rejected by ${actor.display_name || actor.username}.`
           );
         }
 
@@ -183,60 +244,93 @@ exports.decideApproval = [
 
           // Notify requester
           const note = await notificationService.createNotification({
-            target_user_id: iou.requester_id,
-            title: `Expense Returned: ${iou.request_number}`,
-            body: `Your expense for IOU ${iou.request_number} was returned by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''} Please edit and re-submit.`,
-            link: `/ious/${iou.id}`,
-            entity: 'IOU',
-            entity_id: iou.id
+            target_user_id: requesterId,
+            title: `Expense Returned: ${requestNumber}`,
+            body: `Your expense for IOU ${requestNumber} was returned by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''} Please edit and re-submit.`,
+            link: requestLink,
+            entity: requestEntity,
+            entity_id: requestEntityId
           }, { transaction: t });
-          emailsToSend.push({ note, target_user_id: iou.requester_id });
+          emailsToSend.push({ note, target_user_id: requesterId });
 
           // Also notify cashiers
           await notifyCashiers(
-            `Expense Returned: ${iou.request_number}`,
-            `Expense for IOU ${iou.request_number} was returned by ${actor.display_name || actor.username}.`
+            `Expense Returned: ${requestNumber}`,
+            `Expense for IOU ${requestNumber} was returned by ${actor.display_name || actor.username}.`
+          );
+        } else if (approval.approval_type === 'direct_expense') {
+          await iou.update({ status: 'RETURNED' }, { transaction: t });
+
+          const note = await notificationService.createNotification({
+            target_user_id: requesterId,
+            title: `Direct Expense Returned: ${requestNumber}`,
+            body: `Your Direct Expense ${requestNumber} was returned for changes by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''} Please edit and re-submit.`,
+            link: requestLink,
+            entity: requestEntity,
+            entity_id: requestEntityId
+          }, { transaction: t });
+          emailsToSend.push({ note, target_user_id: requesterId });
+
+          const prevApproverIds = await getPreviousApprovedUsers();
+          for (const uid of prevApproverIds) {
+            const pNote = await notificationService.createNotification({
+              target_user_id: uid,
+              title: `Direct Expense Returned: ${requestNumber}`,
+              body: `Direct Expense ${requestNumber} which you approved has been returned for edits by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''}`,
+              link: requestLink,
+              entity: requestEntity,
+              entity_id: requestEntityId
+            }, { transaction: t });
+            emailsToSend.push({ note: pNote, target_user_id: uid });
+          }
+
+          await notifyCashiers(
+            `Direct Expense Returned: ${requestNumber}`,
+            `Direct Expense ${requestNumber} was returned for edits by ${actor.display_name || actor.username}.`
           );
         } else {
           await iou.update({ status: 'RETURNED' }, { transaction: t });
 
           // Notify requester
           const note = await notificationService.createNotification({
-            target_user_id: iou.requester_id,
-            title: `IOU Returned for Edits: ${iou.request_number}`,
-            body: `Your IOU ${iou.request_number} was returned for changes by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''} Please edit and re-submit.`,
-            link: `/ious/${iou.id}`,
-            entity: 'IOU',
-            entity_id: iou.id
+            target_user_id: requesterId,
+            title: `IOU Returned for Edits: ${requestNumber}`,
+            body: `Your IOU ${requestNumber} was returned for changes by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''} Please edit and re-submit.`,
+            link: requestLink,
+            entity: requestEntity,
+            entity_id: requestEntityId
           }, { transaction: t });
-          emailsToSend.push({ note, target_user_id: iou.requester_id });
+          emailsToSend.push({ note, target_user_id: requesterId });
 
           // Notify all previous approvers who already approved
           const prevApproverIds = await getPreviousApprovedUsers();
           for (const uid of prevApproverIds) {
             const pNote = await notificationService.createNotification({
               target_user_id: uid,
-              title: `IOU Returned: ${iou.request_number}`,
-              body: `IOU ${iou.request_number} which you approved has been returned for edits by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''}`,
-              link: `/ious/${iou.id}`,
-              entity: 'IOU',
-              entity_id: iou.id
+              title: `IOU Returned: ${requestNumber}`,
+              body: `IOU ${requestNumber} which you approved has been returned for edits by ${actor.display_name || actor.username}.${comments ? ' Reason: ' + comments : ''}`,
+              link: requestLink,
+              entity: requestEntity,
+              entity_id: requestEntityId
             }, { transaction: t });
             emailsToSend.push({ note: pNote, target_user_id: uid });
           }
 
           // Also notify cashiers
           await notifyCashiers(
-            `IOU Returned: ${iou.request_number}`,
-            `IOU ${iou.request_number} was returned for edits by ${actor.display_name || actor.username}.`
+            `IOU Returned: ${requestNumber}`,
+            `IOU ${requestNumber} was returned for edits by ${actor.display_name || actor.username}.`
           );
         }
 
       } else if (decision === 'APPROVED') {
         // Find if there are ANY remaining pending approvals of this type (excluding the current one we just saved as APPROVED)
+        const remainWhereBase = approval.approval_type === 'direct_expense'
+          ? { direct_expense_id: requestEntityId }
+          : { iou_id: requestEntityId };
         const remainingPending = await Approval.findOne({
           where: {
-            iou_id: iou.id,
+            ...remainWhereBase,
             approval_type: approval.approval_type || 'iou',
             decision: 'PENDING'
           },
@@ -247,7 +341,7 @@ exports.decideApproval = [
           // Find next pending approver in sequence
           const nextApproval = await Approval.findOne({
             where: {
-              iou_id: iou.id,
+              ...remainWhereBase,
               approval_type: approval.approval_type || 'iou',
               decision: 'PENDING',
               step_order: { [Op.gt]: approval.step_order }
@@ -257,34 +351,36 @@ exports.decideApproval = [
           });
 
           if (nextApproval) {
+            const labelPrefix = approval.approval_type === 'direct_expense' ? 'Direct Expense approval'
+              : approval.approval_type === 'expense' ? 'Expense approval' : 'Approval';
             // Email the NEXT approver in sequence
             const note = await notificationService.createNotification({
               target_user_id: nextApproval.approver_id,
-              title: `${approval.approval_type === 'expense' ? 'Expense approval' : 'Approval'} required: ${iou.request_number}`,
-              body: `Step ${approval.step_order} has been approved by ${actor.display_name || actor.username}. It is now your turn to review IOU ${iou.request_number}.`,
-              link: `/ious/${iou.id}`,
-              entity: 'IOU',
-              entity_id: iou.id
+              title: `${labelPrefix} required: ${requestNumber}`,
+              body: `Step ${approval.step_order} has been approved by ${actor.display_name || actor.username}. It is now your turn to review ${requestNumber}.`,
+              link: requestLink,
+              entity: requestEntity,
+              entity_id: requestEntityId
             }, { transaction: t });
             emailsToSend.push({ note, target_user_id: nextApproval.approver_id });
           }
 
           // Also notify cashiers that this step was approved
           await notifyCashiers(
-            `Step ${approval.step_order} approved by ${actor.display_name || actor.username}: ${iou.request_number}`,
-            `${actor.display_name || actor.username} approved Step ${approval.step_order} for IOU ${iou.request_number}.`
+            `Step ${approval.step_order} approved by ${actor.display_name || actor.username}: ${requestNumber}`,
+            `${actor.display_name || actor.username} approved Step ${approval.step_order} for ${requestNumber}.`
           );
 
           // Also notify requester that this step was approved
           const requesterNote = await notificationService.createNotification({
-            target_user_id: iou.requester_id,
-            title: `Step ${approval.step_order} approved: ${iou.request_number}`,
-            body: `Step ${approval.step_order} has been approved by ${actor.display_name || actor.username} for your IOU ${iou.request_number}.`,
-            link: `/ious/${iou.id}`,
-            entity: 'IOU',
-            entity_id: iou.id
+            target_user_id: requesterId,
+            title: `Step ${approval.step_order} approved: ${requestNumber}`,
+            body: `Step ${approval.step_order} has been approved by ${actor.display_name || actor.username} for your request ${requestNumber}.`,
+            link: requestLink,
+            entity: requestEntity,
+            entity_id: requestEntityId
           }, { transaction: t });
-          emailsToSend.push({ note: requesterNote, target_user_id: iou.requester_id });
+          emailsToSend.push({ note: requesterNote, target_user_id: requesterId });
 
         } else {
           // No more pending approvals
@@ -295,38 +391,54 @@ exports.decideApproval = [
 
             // Notify requester
             const note1 = await notificationService.createNotification({
-              target_user_id: iou.requester_id,
-              title: `Expense approved: ${iou.request_number}`,
-              body: `Your expense for IOU ${iou.request_number} has been approved by finance. Cashier will reconcile.`,
-              link: `/ious/${iou.id}`,
-              entity: 'IOU',
-              entity_id: iou.id
+              target_user_id: requesterId,
+              title: `Expense approved: ${requestNumber}`,
+              body: `Your expense for IOU ${requestNumber} has been approved by finance. Cashier will reconcile.`,
+              link: requestLink,
+              entity: requestEntity,
+              entity_id: requestEntityId
             }, { transaction: t });
-            emailsToSend.push({ note: note1, target_user_id: iou.requester_id });
+            emailsToSend.push({ note: note1, target_user_id: requesterId });
 
             // Notify cashiers
             await notifyCashiers(
-              `Expense approved: ${iou.request_number}`,
-              `Expense for IOU ${iou.request_number} has been approved by finance. Please reconcile.`
+              `Expense approved: ${requestNumber}`,
+              `Expense for IOU ${requestNumber} has been approved by finance. Please reconcile.`
             );
+          } else if (approval.approval_type === 'direct_expense') {
+            // No more pending approvals for Direct Expense - notify cashiers to Confirm Approval
+            await notifyCashiers(
+              `All approvals complete - confirm: ${requestNumber}`,
+              `All assigned approvers have approved Direct Expense ${requestNumber}. Please review and click "Confirm Approval" to proceed to disbursement.`
+            );
+
+            const note = await notificationService.createNotification({
+              target_user_id: requesterId,
+              title: `Direct Expense Approvals Complete: ${requestNumber}`,
+              body: `All assigned approvers have approved your Direct Expense ${requestNumber}. Awaiting final confirmation from the Cashier.`,
+              link: requestLink,
+              entity: requestEntity,
+              entity_id: requestEntityId
+            }, { transaction: t });
+            emailsToSend.push({ note, target_user_id: requesterId });
           } else {
             // No more pending approvals - notify cashiers to Confirm Approval
             // Status stays PENDING until Cashier explicitly confirms
             await notifyCashiers(
-              `All approvals complete - confirm: ${iou.request_number}`,
-              `All assigned approvers have approved IOU ${iou.request_number}. Please review and click "Confirm Approval" to proceed to disbursement.`
+              `All approvals complete - confirm: ${requestNumber}`,
+              `All assigned approvers have approved IOU ${requestNumber}. Please review and click "Confirm Approval" to proceed to disbursement.`
             );
 
             // Also notify requester that all approvals passed (but not yet final)
             const note = await notificationService.createNotification({
-              target_user_id: iou.requester_id,
-              title: `IOU Approvals Complete: ${iou.request_number}`,
-              body: `All assigned approvers have approved your IOU ${iou.request_number}. Awaiting final confirmation from the Cashier.`,
-              link: `/ious/${iou.id}`,
-              entity: 'IOU',
-              entity_id: iou.id
+              target_user_id: requesterId,
+              title: `IOU Approvals Complete: ${requestNumber}`,
+              body: `All assigned approvers have approved your IOU ${requestNumber}. Awaiting final confirmation from the Cashier.`,
+              link: requestLink,
+              entity: requestEntity,
+              entity_id: requestEntityId
             }, { transaction: t });
-            emailsToSend.push({ note, target_user_id: iou.requester_id });
+            emailsToSend.push({ note, target_user_id: requesterId });
           }
         }
       }
@@ -380,20 +492,33 @@ exports.listMine = [
       const actor = req.currentUser;
       if (!actor) return res.status(401).json({ message: 'Not authenticated' });
 
+      const includeArr = [
+        { model: IOURequest, as: 'iou', required: false, include: [{ model: User, as: 'requester', attributes: ['id','display_name','username'] }] }
+      ];
+
+      // Include DirectExpenseRequest if model is available
+      if (DirectExpenseRequest) {
+        includeArr.push({
+          model: DirectExpenseRequest, as: 'directExpense', required: false,
+          include: [{ model: User, as: 'requester', attributes: ['id','display_name','username'] }]
+        });
+      }
+
       const approvals = await Approval.findAll({
         where: { approver_id: actor.id, decision: 'PENDING' },
         order: [['created_at','DESC']],
-        include: [
-          { model: IOURequest, as: 'iou', include: [{ model: User, as: 'requester', attributes: ['id','display_name','username'] }] }
-        ]
+        include: includeArr
       });
 
       // Filter out approvals that are not yet active (an earlier step is still pending)
       const activeApprovals = [];
       for (const app of approvals) {
+        const seqWhereBase = app.approval_type === 'direct_expense'
+          ? { direct_expense_id: app.direct_expense_id }
+          : { iou_id: app.iou_id };
         const earlierPending = await Approval.findOne({
           where: {
-            iou_id: app.iou_id,
+            ...seqWhereBase,
             approval_type: app.approval_type || 'iou',
             decision: 'PENDING',
             step_order: { [Op.lt]: app.step_order }

@@ -60,7 +60,7 @@ async function checkAndSendExpenseReminders() {
         let shouldSend = false;
 
         if (!lastReminder) {
-          // No reminder ever sent — check if 24h since IOU was disbursed (updated_at)
+          // No reminder ever sent - check if 24h since IOU was disbursed (updated_at)
           const disbursedAt = new Date(iou.updated_at || iou.created_at);
           if (now - disbursedAt >= REMINDER_INTERVAL_MS) {
             shouldSend = true;

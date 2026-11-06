@@ -81,12 +81,99 @@ async function runMigrations() {
     }
 
     // Alter existing DATETIME columns to DATETIME2 to support ISO date strings in MSSQL
-    try {
+    // Check data type before altering to avoid errors that doom the transaction
+    const [reconUserCol] = await sequelize.query(`
+      SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_NAME = 'reconciliation_records' AND COLUMN_NAME = 'user_confirmed_at'
+    `, { transaction });
+    if (reconUserCol.length > 0 && reconUserCol[0].DATA_TYPE !== 'datetime2') {
       await sequelize.query(`ALTER TABLE reconciliation_records ALTER COLUMN user_confirmed_at DATETIME2 NULL;`, { transaction });
-      await sequelize.query(`ALTER TABLE reconciliation_records ALTER COLUMN cashier_confirmed_at DATETIME2 NULL;`, { transaction });
-    } catch (e) {
-      // Column might already be DATETIME2 or not exist yet
     }
+    const [reconCashierCol] = await sequelize.query(`
+      SELECT DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_NAME = 'reconciliation_records' AND COLUMN_NAME = 'cashier_confirmed_at'
+    `, { transaction });
+    if (reconCashierCol.length > 0 && reconCashierCol[0].DATA_TYPE !== 'datetime2') {
+      await sequelize.query(`ALTER TABLE reconciliation_records ALTER COLUMN cashier_confirmed_at DATETIME2 NULL;`, { transaction });
+    }
+
+    // ─── Direct Expense migrations ───
+    // Make approvals.iou_id nullable (needed for Direct Expense approvals that have no IOU)
+    // Must drop FK constraint first, alter column, then re-add FK
+    const [appIouCol] = await sequelize.query(
+      "SELECT IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'approvals' AND COLUMN_NAME = 'iou_id'",
+      { transaction }
+    );
+    if (appIouCol.length > 0 && appIouCol[0].IS_NULLABLE === 'NO') {
+      console.log('Making approvals.iou_id nullable...');
+      // Find and drop FK constraint
+      const [appFks] = await sequelize.query(
+        "SELECT fk.name AS fk_name FROM sys.foreign_keys fk " +
+        "JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id " +
+        "WHERE fk.parent_object_id = OBJECT_ID('approvals') " +
+        "AND COL_NAME(fkc.parent_object_id, fkc.parent_column_id) = 'iou_id'",
+        { transaction }
+      );
+      for (const fk of appFks) {
+        console.log(`  Dropping FK ${fk.fk_name}...`);
+        await sequelize.query(`ALTER TABLE approvals DROP CONSTRAINT [${fk.fk_name}];`, { transaction });
+      }
+      // Get actual data type
+      const [appColType] = await sequelize.query(
+        "SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS " +
+        "WHERE TABLE_NAME = 'approvals' AND COLUMN_NAME = 'iou_id'",
+        { transaction }
+      );
+      const appDataType = appColType[0].DATA_TYPE === 'char'
+        ? `CHAR(${appColType[0].CHARACTER_MAXIMUM_LENGTH})`
+        : `NVARCHAR(${appColType[0].CHARACTER_MAXIMUM_LENGTH})`;
+      await sequelize.query(`ALTER TABLE approvals ALTER COLUMN iou_id ${appDataType} NULL;`, { transaction });
+      // Re-add FK
+      await sequelize.query(
+        `ALTER TABLE approvals ADD CONSTRAINT FK_approvals_iou_id FOREIGN KEY (iou_id) REFERENCES iou_requests(id);`,
+        { transaction }
+      );
+      console.log('  approvals.iou_id is now nullable with FK restored.');
+    }
+    await addColIfMissing('approvals', 'direct_expense_id', 'NVARCHAR(64) NULL');
+
+    // Make disbursements.iou_id nullable (needed for Direct Expense disbursements)
+    const [disbIouCol] = await sequelize.query(
+      "SELECT IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'disbursements' AND COLUMN_NAME = 'iou_id'",
+      { transaction }
+    );
+    if (disbIouCol.length > 0 && disbIouCol[0].IS_NULLABLE === 'NO') {
+      console.log('Making disbursements.iou_id nullable...');
+      // Find and drop FK constraint
+      const [disbFks] = await sequelize.query(
+        "SELECT fk.name AS fk_name FROM sys.foreign_keys fk " +
+        "JOIN sys.foreign_key_columns fkc ON fk.object_id = fkc.constraint_object_id " +
+        "WHERE fk.parent_object_id = OBJECT_ID('disbursements') " +
+        "AND COL_NAME(fkc.parent_object_id, fkc.parent_column_id) = 'iou_id'",
+        { transaction }
+      );
+      for (const fk of disbFks) {
+        console.log(`  Dropping FK ${fk.fk_name}...`);
+        await sequelize.query(`ALTER TABLE disbursements DROP CONSTRAINT [${fk.fk_name}];`, { transaction });
+      }
+      // Get actual data type
+      const [disbColType] = await sequelize.query(
+        "SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH FROM INFORMATION_SCHEMA.COLUMNS " +
+        "WHERE TABLE_NAME = 'disbursements' AND COLUMN_NAME = 'iou_id'",
+        { transaction }
+      );
+      const disbDataType = disbColType[0].DATA_TYPE === 'char'
+        ? `CHAR(${disbColType[0].CHARACTER_MAXIMUM_LENGTH})`
+        : `NVARCHAR(${disbColType[0].CHARACTER_MAXIMUM_LENGTH})`;
+      await sequelize.query(`ALTER TABLE disbursements ALTER COLUMN iou_id ${disbDataType} NULL;`, { transaction });
+      // Re-add FK
+      await sequelize.query(
+        `ALTER TABLE disbursements ADD CONSTRAINT FK_disbursements_iou_id FOREIGN KEY (iou_id) REFERENCES iou_requests(id);`,
+        { transaction }
+      );
+      console.log('  disbursements.iou_id is now nullable with FK restored.');
+    }
+    await addColIfMissing('disbursements', 'direct_expense_id', 'NVARCHAR(64) NULL');
 
     await transaction.commit();
     console.log('Database schema migration checked successfully.');

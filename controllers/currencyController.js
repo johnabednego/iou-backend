@@ -214,7 +214,7 @@ exports.deleteCurrency = [
       const iouCount = await IOURequest.count({ where: { currency: currency.code } });
 
       if (iouCount === 0) {
-        // No transactions — permanently delete currency and its fund balance
+        // No transactions - permanently delete currency and its fund balance
         await FundBalance.destroy({ where: { currency: currency.code } });
         await currency.destroy();
         await auditService.log({
@@ -228,7 +228,7 @@ exports.deleteCurrency = [
         return res.json({ message: `Currency ${currency.code} permanently deleted (no transactions found)` });
       }
 
-      // Has transactions — soft delete
+      // Has transactions - soft delete
       await currency.update({ is_active: false });
       await auditService.log({
         actorId: actor.id,

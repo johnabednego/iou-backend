@@ -85,7 +85,7 @@ exports.login = async (req, res) => {
 // ── SSO Login via Smart Workplace token ───────────────────────────────────
 // Called when a user arrives from the Smart Workplace portal with a JWT
 // in the URL. We validate the token server-side against SWP's API, then
-// upsert the user locally and create a session — no password needed.
+// upsert the user locally and create a session - no password needed.
 exports.ssoLogin = async (req, res) => {
   const { token } = req.body;
 
@@ -134,7 +134,7 @@ exports.ssoLogin = async (req, res) => {
     // 3. Upsert user into IOU's local database
     const savedUser = await User.upsertFromLdap(syntheticLdapEntry);
 
-    // 4. Create a session — identical to what normal LDAP login does
+    // 4. Create a session - identical to what normal LDAP login does
     req.session.user = {
       id: savedUser.id,
       username: savedUser.username,

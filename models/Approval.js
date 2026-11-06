@@ -12,7 +12,11 @@ Approval.init({
   },
   iou_id: {
     type: DataTypes.UUID,
-    allowNull: false,
+    allowNull: true,
+  },
+  direct_expense_id: {
+    type: DataTypes.UUID,
+    allowNull: true,
   },
   approver_id: {
     type: DataTypes.UUID,

@@ -4,6 +4,8 @@ const ExpenseSubmission = require('../models/ExpenseSubmission');
 const ReconciliationRecord = require('../models/ReconciliationRecord');
 const sequelize = require('../config/database');
 const { Op, fn, col, literal } = require('sequelize');
+let DirectExpenseRequest;
+try { DirectExpenseRequest = require('../models/DirectExpenseRequest'); } catch (_) { }
 
 /**
  * GET /api/analytics/dashboard
@@ -36,7 +38,7 @@ exports.getDashboardAnalytics = [
           if (actor.department && !hodDeptNames.includes(actor.department)) {
             hodDeptNames.push(actor.department);
           }
-        } catch (_) {}
+        } catch (_) { }
       }
 
       if (isPrivileged) {
@@ -289,6 +291,158 @@ exports.getDashboardAnalytics = [
         total_amount: Number(d.total_amount) || 0
       }));
 
+      // ══════════════════════════════════════════
+      // ─── DIRECT EXPENSE ANALYTICS ───
+      // ══════════════════════════════════════════
+      let deData = {};
+      if (DirectExpenseRequest) {
+        // DE: Status Distribution
+        const deStatusDist = await DirectExpenseRequest.findAll({
+          attributes: ['status', [fn('COUNT', col('id')), 'count']],
+          where: userFilter,
+          group: ['status'],
+          raw: true
+        });
+        const deStatusLabels = {
+          'DRAFT': 'Draft',
+          'PENDING_HOD_ASSIGNMENT': 'Awaiting Assignment',
+          'PENDING': 'Pending',
+          'APPROVED_FOR_DISBURSEMENT': 'For Disbursement',
+          'DISBURSED': 'Disbursed',
+          'COMPLETED': 'Completed',
+          'RETURNED': 'Returned',
+          'REJECTED': 'Rejected'
+        };
+        const deStatusDistribution = deStatusDist.map(s => ({
+          status: s.status,
+          label: deStatusLabels[s.status] || s.status,
+          count: parseInt(s.count)
+        }));
+
+        // DE: Pending total
+        const dePendingTotal = await DirectExpenseRequest.count({
+          where: { ...userFilter, status: { [Op.in]: ['PENDING', 'PENDING_HOD_ASSIGNMENT'] } }
+        });
+
+        // DE: by Month (last 12 months)
+        const deByMonth = [];
+        for (let m = 0; m < 12; m++) {
+          const mStart = new Date(twelveMonthsAgo.getFullYear(), twelveMonthsAgo.getMonth() + m, 1);
+          const mEnd = new Date(mStart.getFullYear(), mStart.getMonth() + 1, 0, 23, 59, 59, 999);
+          const mLabel = mStart.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+
+          const deCounts = await DirectExpenseRequest.findAll({
+            attributes: ['status', [fn('COUNT', col('id')), 'count']],
+            where: {
+              ...userFilter,
+              created_at: { [Op.between]: [mStart, mEnd] }
+            },
+            group: ['status'],
+            raw: true
+          });
+
+          const pending = deCounts
+            .filter(r => ['PENDING', 'PENDING_HOD_ASSIGNMENT'].includes(r.status))
+            .reduce((sum, r) => sum + parseInt(r.count), 0);
+          const approved = deCounts
+            .filter(r => ['APPROVED_FOR_DISBURSEMENT', 'DISBURSED', 'COMPLETED'].includes(r.status))
+            .reduce((sum, r) => sum + parseInt(r.count), 0);
+          const rejected = deCounts
+            .filter(r => ['REJECTED'].includes(r.status))
+            .reduce((sum, r) => sum + parseInt(r.count), 0);
+
+          deByMonth.push({ month: mLabel, pending, approved, rejected, total: pending + approved + rejected });
+        }
+
+        // DE: Department Breakdown
+        const deDeptBreakdownRaw = await DirectExpenseRequest.findAll({
+          attributes: [
+            'department',
+            [fn('COUNT', col('id')), 'count'],
+            [fn('SUM', col('amount')), 'total_amount']
+          ],
+          where: {
+            ...userFilter,
+            department: { [Op.ne]: null }
+          },
+          group: ['department'],
+          order: [[fn('COUNT', col('id')), 'DESC']],
+          raw: true
+        });
+
+        const deDepartmentBreakdown = deDeptBreakdownRaw.map(d => ({
+          department: d.department || 'Unassigned',
+          count: parseInt(d.count) || 0,
+          total_amount: Number(d.total_amount) || 0
+        }));
+
+        // DE: Approved/Disbursed amounts by currency
+        const deApprovedStatuses = ['APPROVED_FOR_DISBURSEMENT', 'DISBURSED', 'COMPLETED'];
+        async function computeDeAmounts(dateFilter = {}) {
+          const des = await DirectExpenseRequest.findAll({
+            attributes: ['id', 'currency', 'amount', 'status'],
+            where: { ...userFilter, status: { [Op.in]: deApprovedStatuses }, ...dateFilter },
+            raw: true
+          });
+          const map = {};
+          for (const d of des) {
+            const cur = d.currency || 'GHS';
+            map[cur] = (map[cur] || 0) + (Number(d.amount) || 0);
+          }
+          return map;
+        }
+
+        const [deWeeklyMap, deMonthlyMap, deYearlyMap, deOverallMap] = await Promise.all([
+          computeDeAmounts({ created_at: { [Op.gte]: weekStart } }),
+          computeDeAmounts({ created_at: { [Op.gte]: monthStart } }),
+          computeDeAmounts({ created_at: { [Op.gte]: yearStart } }),
+          computeDeAmounts({})
+        ]);
+
+        const deApprovedAmounts = {
+          weekly: deWeeklyMap,
+          monthly: deMonthlyMap,
+          yearly: deYearlyMap,
+          overall: deOverallMap
+        };
+
+        // DE: Monthly approved chart (last 12 months per currency)
+        const deMonthlyApprovedChart = [];
+        for (let m = 0; m < 12; m++) {
+          const mStart = new Date(twelveMonthsAgo.getFullYear(), twelveMonthsAgo.getMonth() + m, 1);
+          const mEnd = new Date(mStart.getFullYear(), mStart.getMonth() + 1, 0, 23, 59, 59, 999);
+          const mLabel = mStart.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+          const mAmounts = await computeDeAmounts({ created_at: { [Op.between]: [mStart, mEnd] } });
+          deMonthlyApprovedChart.push({ month: mLabel, ...mAmounts });
+        }
+
+        // DE: Currency summary
+        const deCurrencySummary = await DirectExpenseRequest.findAll({
+          attributes: [
+            'currency',
+            [fn('COUNT', col('id')), 'count'],
+            [fn('SUM', col('amount')), 'total_amount']
+          ],
+          where: userFilter,
+          group: ['currency'],
+          raw: true
+        });
+
+        deData = {
+          deStatusDistribution,
+          dePendingTotal,
+          deByMonth,
+          deDepartmentBreakdown,
+          deApprovedAmounts,
+          deMonthlyApprovedChart,
+          deCurrencySummary: deCurrencySummary.map(c => ({
+            currency: c.currency,
+            count: parseInt(c.count),
+            total_amount: Number(c.total_amount) || 0
+          }))
+        };
+      }
+
       return res.json({
         data: {
           iousByMonth,
@@ -304,7 +458,9 @@ exports.getDashboardAnalytics = [
           })),
           monthlyApprovedChart,
           departmentBreakdown,
-          userDepartments: hodDeptNames
+          userDepartments: hodDeptNames,
+          // Direct Expense analytics
+          ...deData
         }
       });
     } catch (err) {
