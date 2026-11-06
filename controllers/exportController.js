@@ -173,8 +173,69 @@ exports.exportRedeemed = [
         limit: 10000
       });
 
-      if (rows.length === 0) {
-        return res.status(404).json({ message: 'No IOUs found matching the selected filters to export.' });
+      // Also query Direct Expenses if applicable
+      let deRows = [];
+      let DirectExpenseRequest;
+      try { DirectExpenseRequest = require('../models/DirectExpenseRequest'); } catch (_) {}
+      if (DirectExpenseRequest && (!spending || spending === 'exact')) {
+        const deWhere = {};
+        if (req.query.status === 'REDEEMED') {
+          deWhere.status = 'COMPLETED';
+        } else if (req.query.status) {
+          deWhere.status = req.query.status;
+        }
+        if (where.department) deWhere.department = where.department;
+        if (where.currency) deWhere.currency = where.currency;
+        if (where.created_at) deWhere.created_at = where.created_at;
+
+        if (search) {
+          const numSearch = parseFloat(search);
+          const deSearchOr = [
+            { request_number: { [Op.like]: `%${search}%` } },
+            { purpose: { [Op.like]: `%${search}%` } },
+            { ifs_voucher_number: { [Op.like]: `%${search}%` } },
+            { '$requester.display_name$': { [Op.like]: `%${search}%` } }
+          ];
+          if (!isNaN(numSearch) && numSearch > 0) {
+            deSearchOr.push({ amount: numSearch });
+          }
+          deWhere[Op.or] = deSearchOr;
+        }
+
+        const deInclude = [
+          { model: User, as: 'requester', attributes: ['id', 'display_name', 'username', 'email', 'department'], required: false },
+          {
+            model: Approval,
+            as: 'approvals',
+            include: [{ model: User, as: 'approver', attributes: ['id', 'display_name', 'username'], required: false }],
+            required: false
+          },
+          {
+            model: Disbursement,
+            as: 'disbursements',
+            include: [{ model: User, as: 'cashier', attributes: ['id', 'display_name', 'username'], required: false }],
+            required: false
+          }
+        ];
+
+        if (approvedBy) {
+          const deAppIdx = deInclude.findIndex(i => i.as === 'approvals');
+          if (deAppIdx >= 0) {
+            deInclude[deAppIdx].required = true;
+            deInclude[deAppIdx].where = { approver_id: approvedBy };
+          }
+        }
+
+        deRows = await DirectExpenseRequest.findAll({
+          where: deWhere,
+          include: deInclude,
+          order: [['created_at', 'DESC']],
+          limit: 10000
+        });
+      }
+
+      if (rows.length === 0 && deRows.length === 0) {
+        return res.status(404).json({ message: 'No settled requests found matching the selected filters to export.' });
       }
 
       // Helper to format date
@@ -190,9 +251,10 @@ exports.exportRedeemed = [
       workbook.creator = 'MPS IOU Manager';
       workbook.created = new Date();
 
-      const sheet = workbook.addWorksheet('IOUs Export', {
-        headerFooter: { firstHeader: 'MPS IOU Manager - IOUs Export' }
-      });
+      if (rows.length > 0) {
+        const sheet = workbook.addWorksheet('IOUs Export', {
+          headerFooter: { firstHeader: 'MPS IOU Manager - IOUs Export' }
+        });
 
       // Define columns - full A-to-Z transaction details
       sheet.columns = [
@@ -397,10 +459,129 @@ exports.exportRedeemed = [
 
       // Freeze first row and first column
       sheet.views = [{ state: 'frozen', xSplit: 1, ySplit: 1, topLeftCell: 'B2' }];
+      }
+
+      // Direct Expenses Sheet
+      if (deRows.length > 0) {
+        const deSheet = workbook.addWorksheet('Direct Expenses Export', {
+          headerFooter: { firstHeader: 'MPS IOU Manager - Direct Expenses Export' }
+        });
+
+        deSheet.columns = [
+          { header: 'Request #', key: 'request_number', width: 25 },
+          { header: 'IFS Voucher #', key: 'ifs_voucher_number', width: 18 },
+          { header: 'Purpose', key: 'purpose', width: 40 },
+          { header: 'Requester', key: 'requester_name', width: 22 },
+          { header: 'Requester Email', key: 'requester_email', width: 28 },
+          { header: 'Department', key: 'department', width: 18 },
+          { header: 'Currency', key: 'currency', width: 10 },
+          { header: 'Amount', key: 'amount', width: 14 },
+          { header: 'Status', key: 'status', width: 16 },
+          { header: 'Date Submitted', key: 'submitted_at', width: 20 },
+
+          // Approvals
+          { header: 'Approver 1', key: 'approver_1_name', width: 22 },
+          { header: 'Approver 1 Decision', key: 'approver_1_decision', width: 18 },
+          { header: 'Approver 1 Comments', key: 'approver_1_comments', width: 30 },
+          { header: 'Approver 1 Date', key: 'approver_1_date', width: 20 },
+
+          { header: 'Approver 2', key: 'approver_2_name', width: 22 },
+          { header: 'Approver 2 Decision', key: 'approver_2_decision', width: 18 },
+          { header: 'Approver 2 Comments', key: 'approver_2_comments', width: 30 },
+          { header: 'Approver 2 Date', key: 'approver_2_date', width: 20 },
+
+          { header: 'Approver 3', key: 'approver_3_name', width: 22 },
+          { header: 'Approver 3 Decision', key: 'approver_3_decision', width: 18 },
+          { header: 'Approver 3 Comments', key: 'approver_3_comments', width: 30 },
+          { header: 'Approver 3 Date', key: 'approver_3_date', width: 20 },
+
+          // Disbursement
+          { header: 'Disbursed Amount', key: 'disbursed_amount', width: 18 },
+          { header: 'Payment Method', key: 'payment_method', width: 18 },
+          { header: 'Payment Reference', key: 'payment_reference', width: 20 },
+          { header: 'Disbursed By', key: 'disbursed_by', width: 22 },
+          { header: 'Disbursed Date', key: 'disbursed_at', width: 20 },
+          { header: 'Disbursement Notes', key: 'disbursement_notes', width: 30 },
+          { header: 'User Confirmed Receipt', key: 'user_confirmed_receipt', width: 20 },
+          { header: 'Receipt Confirmed Date', key: 'receipt_confirmed_at', width: 20 },
+
+          // Last Updated
+          { header: 'Last Updated', key: 'updated_at', width: 20 },
+        ];
+
+        const deHeaderRow = deSheet.getRow(1);
+        deHeaderRow.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10 };
+        deHeaderRow.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FF00897B' }
+        };
+        deHeaderRow.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        deHeaderRow.height = 30;
+
+        for (const de of deRows) {
+          const approvals = (de.approvals || []).sort((a, b) => (a.step_order || 0) - (b.step_order || 0));
+          const ap1 = approvals[0] || {};
+          const ap2 = approvals[1] || {};
+          const ap3 = approvals[2] || {};
+          const disb = (de.disbursements || []).sort((a, b) => new Date(b.disbursed_at || 0) - new Date(a.disbursed_at || 0))[0] || {};
+
+          deSheet.addRow({
+            request_number: de.request_number,
+            ifs_voucher_number: de.ifs_voucher_number || '',
+            purpose: de.purpose || '',
+            requester_name: de.requester ? (de.requester.display_name || de.requester.username) : '',
+            requester_email: de.requester ? de.requester.email : '',
+            department: de.department || '',
+            currency: de.currency || 'GHS',
+            amount: parseFloat(de.amount) || 0,
+            status: de.status,
+            submitted_at: fmtDate(de.created_at),
+
+            approver_1_name: ap1.approver ? (ap1.approver.display_name || ap1.approver.username) : '',
+            approver_1_decision: ap1.decision || '',
+            approver_1_comments: ap1.comments || '',
+            approver_1_date: fmtDate(ap1.decided_at),
+
+            approver_2_name: ap2.approver ? (ap2.approver.display_name || ap2.approver.username) : '',
+            approver_2_decision: ap2.decision || '',
+            approver_2_comments: ap2.comments || '',
+            approver_2_date: fmtDate(ap2.decided_at),
+
+            approver_3_name: ap3.approver ? (ap3.approver.display_name || ap3.approver.username) : '',
+            approver_3_decision: ap3.decision || '',
+            approver_3_comments: ap3.comments || '',
+            approver_3_date: fmtDate(ap3.decided_at),
+
+            disbursed_amount: disb.amount ? parseFloat(disb.amount) : '',
+            payment_method: disb.payment_method || '',
+            payment_reference: disb.payment_reference || '',
+            disbursed_by: disb.cashier ? (disb.cashier.display_name || disb.cashier.username) : '',
+            disbursed_at: fmtDate(disb.disbursed_at),
+            disbursement_notes: disb.notes || '',
+            user_confirmed_receipt: disb.confirmed_by_user ? 'YES' : 'NO',
+            receipt_confirmed_at: fmtDate(disb.confirmed_at),
+
+            updated_at: fmtDate(de.updated_at),
+          });
+        }
+
+        const deLastCol = deSheet.columnCount;
+        const deLastColLetter = deSheet.getColumn(deLastCol).letter;
+        deSheet.autoFilter = {
+          from: 'A1',
+          to: `${deLastColLetter}${deRows.length + 1}`
+        };
+        deSheet.views = [{ state: 'frozen', xSplit: 1, ySplit: 1, topLeftCell: 'B2' }];
+      }
 
       // Set response headers
       const timestamp = new Date().toISOString().slice(0, 10);
-      const filename = `ious_export_${timestamp}.xlsx`;
+      const filename = rows.length > 0 && deRows.length > 0
+        ? `settled_requests_${timestamp}.xlsx`
+        : deRows.length > 0
+        ? `direct_expenses_${timestamp}.xlsx`
+        : `ious_export_${timestamp}.xlsx`;
 
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

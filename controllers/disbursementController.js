@@ -32,10 +32,6 @@ exports.disburse = [
 
       const { amount, payment_method, payment_reference, notes, ifs_voucher_number } = req.body;
       if (!amount) { await t.rollback(); return res.status(400).json({ message: 'amount is required' }); }
-      if (!ifs_voucher_number || !ifs_voucher_number.trim()) {
-        await t.rollback();
-        return res.status(400).json({ message: 'IFS Voucher Number is required for disbursement' });
-      }
 
       const disbursement = await Disbursement.create({
         iou_id: iou.id,
@@ -78,10 +74,11 @@ exports.disburse = [
         notes: `Disbursement for IOU ${iou.request_number}`
       }, { transaction: t });
 
-      await iou.update({
-        status: 'DISBURSED',
-        ifs_voucher_number: ifs_voucher_number.trim()
-      }, { transaction: t });
+      const iouUpdates = { status: 'DISBURSED' };
+      if (ifs_voucher_number && ifs_voucher_number.trim()) {
+        iouUpdates.ifs_voucher_number = ifs_voucher_number.trim();
+      }
+      await iou.update(iouUpdates, { transaction: t });
 
       await auditService.log({
         actorId: actor.id,
@@ -89,7 +86,12 @@ exports.disburse = [
         action: 'DISBURSE_IOU',
         entity: 'IOU',
         entityId: iou.id,
-        details: { disbursement_id: disbursement.id, amount, payment_method, ifs_voucher_number: ifs_voucher_number.trim() }
+        details: {
+          disbursement_id: disbursement.id,
+          amount,
+          payment_method,
+          ...(ifs_voucher_number && ifs_voucher_number.trim() ? { ifs_voucher_number: ifs_voucher_number.trim() } : {})
+        }
       }, { transaction: t });
 
       // Notify requester
