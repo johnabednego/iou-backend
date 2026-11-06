@@ -19,6 +19,12 @@ FundBalance.init({
     type: DataTypes.DECIMAL(18, 2),
     allowNull: false,
     defaultValue: 0,
+    validate: {
+      min: {
+        args: [0],
+        msg: 'Fund balance cannot be negative.'
+      }
+    }
   },
   last_updated_by: {
     type: DataTypes.UUID,

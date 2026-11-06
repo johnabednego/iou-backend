@@ -39,6 +39,14 @@ exports.createDirectExpense = [
 
       const { purpose, amount, currency, attachments } = req.body;
 
+      const numAmount = Number(amount);
+      if (amount === undefined || amount === null || isNaN(numAmount) || numAmount <= 0) {
+        await t.rollback();
+        return res.status(400).json({
+          message: 'Amount must be greater than 0.00. Requests with an amount of 0 or less are not accepted.'
+        });
+      }
+
       // Attachments are REQUIRED for Direct Expense
       if (!Array.isArray(attachments) || attachments.length === 0) {
         await t.rollback();
@@ -47,15 +55,13 @@ exports.createDirectExpense = [
 
       // Fund sufficiency check
       const deCurrency = (currency || 'GHS').toUpperCase().trim();
-      if (amount && Number(amount) > 0) {
-        const fundBalance = await FundBalance.findOne({ where: { currency: deCurrency }, transaction: t });
-        const available = fundBalance ? Number(fundBalance.available_amount) : 0;
-        if (available < Number(amount)) {
-          await t.rollback();
-          return res.status(400).json({
-            message: 'Insufficient funds available for this currency. Please contact the Finance Department.'
-          });
-        }
+      const fundBalance = await FundBalance.findOne({ where: { currency: deCurrency }, transaction: t });
+      const available = fundBalance ? Number(fundBalance.available_amount) : 0;
+      if (available <= 0 || available < numAmount) {
+        await t.rollback();
+        return res.status(400).json({
+          message: 'Insufficient funds available for this currency. Please contact the Finance Department.'
+        });
       }
 
       const de = await DirectExpenseRequest.create({
@@ -63,7 +69,7 @@ exports.createDirectExpense = [
         requester_id: actor.id,
         department: actor.department || null,
         purpose: purpose || null,
-        amount: amount || null,
+        amount: numAmount,
         currency: deCurrency,
         status: 'DRAFT'
       }, { transaction: t });
@@ -301,6 +307,15 @@ exports.updateDirectExpense = [
       const payload = {};
       allowed.forEach(k => { if (req.body[k] !== undefined) payload[k] = req.body[k]; });
 
+      if (payload.amount !== undefined) {
+        const numAmount = Number(payload.amount);
+        if (isNaN(numAmount) || numAmount <= 0) {
+          await t.rollback();
+          return res.status(400).json({ message: 'Amount must be greater than 0.00' });
+        }
+        payload.amount = numAmount;
+      }
+
       await de.update(payload, { transaction: t });
 
       const { attachments } = req.body;
@@ -379,6 +394,11 @@ exports.submitDirectExpense = [
       if (de.requester_id !== actor.id && !actor.is_admin) { await t.rollback(); return res.status(403).json({ message: 'Forbidden' }); }
 
       if (!['DRAFT', 'RETURNED'].includes(de.status) && !actor.is_admin) { await t.rollback(); return res.status(400).json({ message: `Cannot submit Direct Expense in status ${de.status}` }); }
+
+      if (!de.amount || Number(de.amount) <= 0) {
+        await t.rollback();
+        return res.status(400).json({ message: 'Cannot submit Direct Expense with an amount of 0.00. Amount must be greater than 0.' });
+      }
 
       // Verify attachments exist (required for direct expense)
       const attachmentCount = await DirectExpenseAttachment.count({ where: { direct_expense_id: de.id }, transaction: t });

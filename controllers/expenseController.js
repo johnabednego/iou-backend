@@ -708,11 +708,10 @@ exports.reconcile = [
         let txNotes = '';
 
         if (diff > 0) {
-          // Overspent: actual > estimated - deduct the overspent difference
-          newBalance = currentAvailable - diff;
+          // Overspent: actual > estimated - deduct the overspent difference (cannot drop below 0.00)
+          newBalance = Math.max(0, currentAvailable - diff);
           txType = 'RECONCILIATION_DEBIT';
           txNotes = `Overspent reconciliation for IOU ${iou.request_number}: additional ${diff.toFixed(2)} ${iouCurrency} deducted`;
-          // Allow negative balance (cashier will need to top up) - don't block reconciliation
         } else {
           // Underspent: actual < estimated - credit the underspent difference back
           const creditAmount = Math.abs(diff);

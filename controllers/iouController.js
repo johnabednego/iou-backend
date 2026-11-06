@@ -39,17 +39,23 @@ exports.createIOU = [
 
       const { purpose, estimated_amount, currency, attachments } = req.body;
 
+      const numEstimated = Number(estimated_amount);
+      if (estimated_amount === undefined || estimated_amount === null || isNaN(numEstimated) || numEstimated <= 0) {
+        await t.rollback();
+        return res.status(400).json({
+          message: 'Amount must be greater than 0.00. Requests with an amount of 0 or less are not accepted.'
+        });
+      }
+
       // Fund sufficiency check
       const iouCurrency = (currency || 'GHS').toUpperCase().trim();
-      if (estimated_amount && Number(estimated_amount) > 0) {
-        const fundBalance = await FundBalance.findOne({ where: { currency: iouCurrency }, transaction: t });
-        const available = fundBalance ? Number(fundBalance.available_amount) : 0;
-        if (available < Number(estimated_amount)) {
-          await t.rollback();
-          return res.status(400).json({
-            message: 'Insufficient funds available for this currency. Please contact the Finance Department.'
-          });
-        }
+      const fundBalance = await FundBalance.findOne({ where: { currency: iouCurrency }, transaction: t });
+      const available = fundBalance ? Number(fundBalance.available_amount) : 0;
+      if (available <= 0 || available < numEstimated) {
+        await t.rollback();
+        return res.status(400).json({
+          message: 'Insufficient funds available for this currency. Please contact the Finance Department.'
+        });
       }
 
       const iou = await IOURequest.create({
@@ -57,7 +63,7 @@ exports.createIOU = [
         requester_id: actor.id,
         department: actor.department || null,
         purpose: purpose || null,
-        estimated_amount: estimated_amount || null,
+        estimated_amount: numEstimated,
         currency: iouCurrency,
         status: 'DRAFT'
       }, { transaction: t });
@@ -387,6 +393,15 @@ exports.updateIOU = [
       const payload = {};
       allowed.forEach(k => { if (req.body[k] !== undefined) payload[k] = req.body[k]; });
 
+      if (payload.estimated_amount !== undefined) {
+        const numEstimated = Number(payload.estimated_amount);
+        if (isNaN(numEstimated) || numEstimated <= 0) {
+          await t.rollback();
+          return res.status(400).json({ message: 'Amount must be greater than 0.00' });
+        }
+        payload.estimated_amount = numEstimated;
+      }
+
       await iou.update(payload, { transaction: t });
 
       const { attachments } = req.body;
@@ -461,6 +476,11 @@ exports.submitIOU = [
       if (iou.requester_id !== actor.id && !actor.is_admin) { await t.rollback(); return res.status(403).json({ message: 'Forbidden' }); }
 
       if (!['DRAFT', 'RETURNED'].includes(iou.status) && !actor.is_admin) { await t.rollback(); return res.status(400).json({ message: `Cannot submit IOU in status ${iou.status}` }); }
+
+      if (!iou.estimated_amount || Number(iou.estimated_amount) <= 0) {
+        await t.rollback();
+        return res.status(400).json({ message: 'Cannot submit IOU with an amount of 0.00. Amount must be greater than 0.' });
+      }
 
       // Remove any stale approval rows from a previous submission (e.g. RETURNED then resubmitted)
       await Approval.destroy({ where: { iou_id: iou.id, approval_type: 'iou' }, transaction: t });

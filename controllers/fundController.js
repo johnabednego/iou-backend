@@ -86,6 +86,10 @@ exports.updateFundBalance = [
 
       switch (action) {
         case 'set':
+          if (numAmount < 0) {
+            await t.rollback();
+            return res.status(400).json({ message: 'Fund balance cannot be set to a negative value.' });
+          }
           newAmount = numAmount;
           txType = 'MANUAL_SET';
           break;
@@ -97,12 +101,19 @@ exports.updateFundBalance = [
           if (previousAmount < numAmount) {
             await t.rollback();
             return res.status(400).json({
-              message: `Cannot decrease by ${numAmount}. Current balance is ${previousAmount} ${upperCurrency}.`
+              message: `Cannot decrease by ${numAmount}. Current balance is ${previousAmount} ${upperCurrency}. Resulting balance cannot be negative.`
             });
           }
           newAmount = previousAmount - numAmount;
           txType = 'MANUAL_DEBIT';
           break;
+      }
+
+      if (newAmount < 0) {
+        await t.rollback();
+        return res.status(400).json({
+          message: `Fund balance cannot be set to a negative value. Resulting balance would be ${newAmount} ${upperCurrency}.`
+        });
       }
 
       await balance.update({
@@ -165,13 +176,13 @@ exports.checkFunds = [
       const numAmount = Number(amount);
 
       if (isNaN(numAmount) || numAmount <= 0) {
-        return res.status(400).json({ message: 'amount must be a positive number' });
+        return res.json({ sufficient: false, message: 'Amount must be greater than 0.00' });
       }
 
       const balance = await FundBalance.findOne({ where: { currency: upperCurrency } });
       const available = balance ? Number(balance.available_amount) : 0;
 
-      return res.json({ sufficient: available >= numAmount });
+      return res.json({ sufficient: available > 0 && available >= numAmount });
     } catch (err) {
       console.error('checkFunds error', err);
       return res.status(500).json({ message: 'Error checking funds' });
