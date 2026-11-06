@@ -529,8 +529,16 @@ exports.assignApprovers = [
       // 4. Sort and validate approvers
       const sortedApprovers = [...approvers].sort((a, b) => (a.step_order ?? 0) - (b.step_order ?? 0));
 
-      // ENFORCE: minimum 2 finance/authorizer approvers (step 2+)
-      const financeApprovers = [];
+      // ENFORCE: Direct Expense requires a minimum of 2 approvers TOTAL (1 HOD + at least 1 authorizer from Approvers list)
+      if (sortedApprovers.length < 2) {
+        await t.rollback();
+        return res.status(400).json({
+          message: 'Direct Expense requests require a minimum of 2 approvers (1 Head of Department + at least 1 authorizer from the Approvers list).',
+          code: 'MIN_APPROVERS_NOT_MET'
+        });
+      }
+
+      const approverListUsers = [];
       for (let idx = 0; idx < sortedApprovers.length; idx++) {
         const app = sortedApprovers[idx];
         const user = await User.findByPk(app.approver_id, { transaction: t });
@@ -541,50 +549,40 @@ exports.assignApprovers = [
 
         const name = user.display_name || user.username;
 
-        // Step 1 check (when no approvals decided yet) - must be HOD
+        // Step 1 check (when no approvals decided yet) - MUST be HOD
         if (idx === 0 && decidedApprovals.length === 0) {
           const DepartmentHOD = require('../models/DepartmentHOD');
           const isDeptHod = await DepartmentHOD.findOne({ where: { user_id: user.id }, transaction: t });
-          if (user.role !== 'hod' && !isDeptHod) {
+          const isDeptHead = await Department.findOne({ where: { hod_user_id: user.id }, transaction: t });
+          if (user.role !== 'hod' && !isDeptHod && !isDeptHead) {
             await t.rollback();
             const currentRole = user.role || 'no role assigned';
             return res.status(400).json({
-              message: `The first approver must be a Head of Department (HOD). "${name}" currently has the role "${currentRole}". Please update their role to HOD first before assigning them as an approver.`,
+              message: `The first approver must be a Head of Department (HOD). "${name}" currently has the role "${currentRole}". Department Heads must be appointed in Department Management before they can be assigned as the first approver.`,
               code: 'FIRST_APPROVER_NOT_HOD',
               user: { id: user.id, display_name: user.display_name, username: user.username, role: user.role }
             });
           }
         }
 
-        // Step 2+ check: must be in managed Approvers list, Finance, Admin, or HOD
+        // Step 2+ check: MUST be strictly picked from the managed Approvers list (user.is_approver === true), NOT HOD again
         if (idx > 0 || decidedApprovals.length > 0) {
-          const DepartmentHOD = require('../models/DepartmentHOD');
-          const isManagedApprover = user.is_approver === true;
-          const isFinance = user.department && user.department.toLowerCase().includes('finance');
-          const isAdmin = user.is_admin === true;
-          const isHodRole = user.role === 'hod';
-          const isHodDept = await Department.findOne({ where: { hod_user_id: user.id }, transaction: t });
-          const isDeptHodEntry = await DepartmentHOD.findOne({ where: { user_id: user.id }, transaction: t });
-
-          if (!isManagedApprover && !isFinance && !isAdmin && !isHodRole && !isHodDept && !isDeptHodEntry) {
+          if (!user.is_approver) {
             await t.rollback();
             return res.status(400).json({
-              message: `User "${name}" cannot be assigned as an approver. Approvers must be added to the Approvers list, belong to the Finance department, be an Admin, or be a Head of Department.`
+              message: `Approver "${name}" at step ${app.step_order} must be from the managed Approvers list. Heads of Department cannot be assigned for step 2 onwards unless they are also in the Approvers list.`,
+              code: 'APPROVER_NOT_IN_MANAGED_LIST'
             });
           }
-
-          // Count finance/authorizer approvers for minimum-2 enforcement
-          if (isManagedApprover || isFinance || isAdmin) {
-            financeApprovers.push(user);
-          }
+          approverListUsers.push(user);
         }
       }
 
-      // ENFORCE minimum 2 finance/authorizer approvers for Direct Expense
-      if (financeApprovers.length < 2) {
+      // ENFORCE: At least 1 authorizer from the Approvers list (Finance can be 1)
+      if (approverListUsers.length < 1) {
         await t.rollback();
         return res.status(400).json({
-          message: `Direct Expense requests require a minimum of 2 finance/authorizer approvers. Currently only ${financeApprovers.length} assigned. Please add at least ${2 - financeApprovers.length} more.`,
+          message: 'Direct Expense requests require at least 1 authorizer from the Approvers list in addition to the Head of Department.',
           code: 'MIN_FINANCE_APPROVERS_NOT_MET'
         });
       }

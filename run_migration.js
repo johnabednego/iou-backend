@@ -29,17 +29,27 @@ async function runMigrations() {
     await addColIfMissing('departments', 'ldap_aliases', 'NVARCHAR(MAX) NULL');
 
     // Promote all existing HODs in department_hods or departments.hod_user_id to role = 'hod' (if not admin)
+    // and default any unassigned HOD back to 'employee'
     try {
       await sequelize.query(`
         UPDATE users
         SET role = 'hod'
         WHERE role != 'admin'
           AND (
-            id IN (SELECT user_id FROM department_hods)
-            OR id IN (SELECT hod_user_id FROM departments WHERE hod_user_id IS NOT NULL)
+            id IN (SELECT user_id FROM department_hods WHERE user_id IS NOT NULL)
+            OR id IN (SELECT hod_user_id FROM departments WHERE hod_user_id IS NOT NULL AND is_active = 1)
           );
       `, { transaction });
-      console.log('Promoted all department HOD users to role hod.');
+
+      await sequelize.query(`
+        UPDATE users
+        SET role = 'employee'
+        WHERE role = 'hod'
+          AND id NOT IN (SELECT user_id FROM department_hods WHERE user_id IS NOT NULL)
+          AND id NOT IN (SELECT hod_user_id FROM departments WHERE hod_user_id IS NOT NULL AND is_active = 1);
+      `, { transaction });
+
+      console.log('Synchronized HOD roles: valid department heads promoted, unassigned users defaulted to employee.');
     } catch (hodRoleErr) {
       console.warn('HOD role update note:', hodRoleErr.message);
     }

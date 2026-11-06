@@ -325,6 +325,11 @@ exports.updateDepartment = [
 
         payload.hod_user_id = uniqueHodIds.length > 0 ? uniqueHodIds[0] : null;
 
+        // Retrieve existing HODs before removing
+        const existingRecords = await DepartmentHOD.findAll({ where: { department_id: dept.id } });
+        const previousHodIds = new Set(existingRecords.map(h => h.user_id));
+        if (dept.hod_user_id) previousHodIds.add(dept.hod_user_id);
+
         // Remove removed HODs from department_hods
         await DepartmentHOD.destroy({
           where: {
@@ -340,6 +345,22 @@ exports.updateDepartment = [
           });
           // Ensure assigned users have role 'hod'
           await User.update({ role: 'hod' }, { where: { id: uId, role: { [Op.ne]: 'admin' } } });
+        }
+
+        // For any previous HOD who is no longer an HOD of this department:
+        // Check if they are HOD of any other department. If not, revert role to 'employee'
+        for (const prevId of previousHodIds) {
+          if (!uniqueHodIds.includes(prevId)) {
+            const otherDeptCount = await DepartmentHOD.count({
+              where: { user_id: prevId, department_id: { [Op.ne]: dept.id } }
+            });
+            const isLegacyOnOther = await Department.count({
+              where: { hod_user_id: prevId, id: { [Op.ne]: dept.id }, is_active: true }
+            });
+            if (otherDeptCount === 0 && isLegacyOnOther === 0) {
+              await User.update({ role: 'employee' }, { where: { id: prevId, role: 'hod' } });
+            }
+          }
         }
       }
 
@@ -384,13 +405,29 @@ exports.deleteDepartment = [
       const dept = await Department.findByPk(id);
       if (!dept) return res.status(404).json({ message: 'Department not found' });
 
+      // Retrieve existing HODs before deleting/deactivating
+      const existingRecords = await DepartmentHOD.findAll({ where: { department_id: dept.id } });
+      const previousHodIds = new Set(existingRecords.map(h => h.user_id));
+      if (dept.hod_user_id) previousHodIds.add(dept.hod_user_id);
+
       // Check if department is used by users or IOUs
       const userCount = await User.count({ where: { department: dept.name } });
       const iouCount = await IOURequest.count({ where: { department: dept.name } });
 
       if (userCount > 0 || iouCount > 0) {
         // Soft-delete / deactivate instead to protect historical records
-        await dept.update({ is_active: false });
+        await DepartmentHOD.destroy({ where: { department_id: dept.id } });
+        await dept.update({ is_active: false, hod_user_id: null });
+
+        // Demote unassigned HODs to employee
+        for (const prevId of previousHodIds) {
+          const otherDeptCount = await DepartmentHOD.count({ where: { user_id: prevId } });
+          const isLegacyOnOther = await Department.count({ where: { hod_user_id: prevId, is_active: true } });
+          if (otherDeptCount === 0 && isLegacyOnOther === 0) {
+            await User.update({ role: 'employee' }, { where: { id: prevId, role: 'hod' } });
+          }
+        }
+
         return res.json({
           message: `Department has ${userCount} user(s) and ${iouCount} IOU(s). It has been deactivated instead of deleted to protect historical records.`,
           deactivated: true
@@ -400,6 +437,15 @@ exports.deleteDepartment = [
       // Safe to hard delete
       await DepartmentHOD.destroy({ where: { department_id: dept.id } });
       await dept.destroy();
+
+      // Demote unassigned HODs to employee
+      for (const prevId of previousHodIds) {
+        const otherDeptCount = await DepartmentHOD.count({ where: { user_id: prevId } });
+        const isLegacyOnOther = await Department.count({ where: { hod_user_id: prevId, is_active: true } });
+        if (otherDeptCount === 0 && isLegacyOnOther === 0) {
+          await User.update({ role: 'employee' }, { where: { id: prevId, role: 'hod' } });
+        }
+      }
 
       return res.json({ message: 'Department deleted successfully', deleted: true });
     } catch (err) {

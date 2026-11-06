@@ -81,14 +81,22 @@ exports.getUsers = [
       const offset = parseInt(req.query.offset || '0', 10);
 
       const where = {};
-      if (req.query.role) where.role = req.query.role;
+      if (req.query.role === 'hod') {
+        const Department = require('../models/Department');
+        const DepartmentHOD = require('../models/DepartmentHOD');
+        const deptHods = await DepartmentHOD.findAll({ attributes: ['user_id'], raw: true });
+        const legacyHods = await Department.findAll({ where: { hod_user_id: { [Op.ne]: null } }, attributes: ['hod_user_id'], raw: true });
+        const hodUserIds = [...new Set([...deptHods.map(d => d.user_id), ...legacyHods.map(d => d.hod_user_id)].filter(Boolean))];
+        where[Op.or] = [
+          { role: 'hod' },
+          ...(hodUserIds.length > 0 ? [{ id: { [Op.in]: hodUserIds } }] : [])
+        ];
+      } else if (req.query.role) {
+        where.role = req.query.role;
+      }
       if (req.query.is_active !== undefined) where.is_active = req.query.is_active === 'true';
       if (req.query.is_approver === 'true') {
-        where[Op.or] = [
-          { is_approver: true },
-          { is_admin: true },
-          { role: 'hod' }
-        ];
+        where.is_approver = true;
       }
       
       if (req.query.search) {
@@ -168,6 +176,12 @@ exports.createUser = [
       const { username, email, display_name, role, is_admin } = req.body;
       if (!username) return res.status(400).json({ message: 'username is required' });
 
+      if (role === 'hod') {
+        return res.status(400).json({
+          message: 'The Head of Department (HOD) role cannot be assigned directly in User Management. It is assigned automatically when a user is appointed as Department Head in Department Management.'
+        });
+      }
+
       const [user, created] = await User.findOrCreate({
         where: { username },
         defaults: {
@@ -221,6 +235,11 @@ exports.updateUser = [
       });
 
       if (isAdmin) {
+        if (req.body.role === 'hod') {
+          return res.status(400).json({
+            message: 'The Head of Department (HOD) role cannot be assigned directly in User Management. It is assigned automatically when a user is appointed as Department Head in Department Management.'
+          });
+        }
         allowedForAdmin.forEach(k => {
           if (Object.prototype.hasOwnProperty.call(req.body, k)) payload[k] = req.body[k];
         });
@@ -233,14 +252,15 @@ exports.updateUser = [
 
       await user.update(payload);
 
-      // If department changed and user is HOD, update department_hods
-      if (isAdmin && payload.department && payload.department !== user.department && user.role === 'hod') {
+      // If user was HOD and role is changed, clean up department HOD links
+      if (isAdmin && payload.role && payload.role !== 'hod' && user.role === 'hod') {
         const Department = require('../models/Department');
         const DepartmentHOD = require('../models/DepartmentHOD');
         await DepartmentHOD.destroy({ where: { user_id: user.id } });
-        const newDept = await Department.findOne({ where: { name: payload.department } });
-        if (newDept) {
-          await DepartmentHOD.findOrCreate({ where: { department_id: newDept.id, user_id: user.id } });
+        const dept = await Department.findOne({ where: { hod_user_id: user.id } });
+        if (dept) {
+          const nextHod = await DepartmentHOD.findOne({ where: { department_id: dept.id } });
+          await dept.update({ hod_user_id: nextHod ? nextHod.user_id : null });
         }
       }
       return res.json({ message: 'User updated', user });
@@ -268,6 +288,12 @@ exports.setRole = [
         return res.status(400).json({ message: 'role or is_admin required in body' });
       }
 
+      if (role === 'hod') {
+        return res.status(400).json({
+          message: 'The Head of Department (HOD) role cannot be assigned directly in User Management. It is assigned automatically when a user is appointed as Department Head in Department Management.'
+        });
+      }
+
       const user = await User.findByPk(id);
       if (!user) return res.status(404).json({ message: 'User not found' });
 
@@ -276,21 +302,8 @@ exports.setRole = [
       if (typeof role !== 'undefined') updates.role = role;
       if (typeof is_admin !== 'undefined') updates.is_admin = !!is_admin;
 
-      // HOD assignment logic: allow multiple HODs per department without demoting existing HODs
-      const DepartmentHOD = require('../models/DepartmentHOD');
-      if (role === 'hod' && user.department) {
-        const dept = await Department.findOne({ where: { name: user.department } });
-        if (dept) {
-          await DepartmentHOD.findOrCreate({
-            where: { department_id: dept.id, user_id: user.id }
-          });
-          if (!dept.hod_user_id) {
-            await dept.update({ hod_user_id: user.id });
-          }
-        }
-      }
-
       // If user was HOD and is being changed to a different role, remove them from department_hods
+      const DepartmentHOD = require('../models/DepartmentHOD');
       if (role && role !== 'hod' && user.role === 'hod') {
         await DepartmentHOD.destroy({ where: { user_id: user.id } });
         // If they were primary hod_user_id on department, update to next available HOD or null
@@ -302,32 +315,6 @@ exports.setRole = [
       }
 
       await user.update(updates);
-
-      // If the user was promoted to HOD, send them an email notification
-      if (role === 'hod') {
-        const hodName = user.display_name || user.username;
-        const emailTitle = `You have been assigned as Head of Department`;
-        const emailBody = `Hello ${hodName},\n\nYou have been assigned as a Head of Department (HOD) in the MPS IOU Management System.\n\nAs an HOD, you will be required to review and approve IOU requests from your department. You will receive notifications when your approval is needed.\n\nPlease log in to the IOU system to review any pending requests assigned to you.`;
-        const emailLink = `/`;
-
-        // Create in-app notification
-        notificationService.createNotification({
-          target_user_id: user.id,
-          title: emailTitle,
-          body: emailBody,
-          link: emailLink,
-          entity: 'USER',
-          entity_id: user.id
-        }).catch(err => console.error('Failed to create HOD notification:', err));
-
-        // Send email async
-        emailService.sendNotificationEmailForUser(user.id, emailTitle, emailBody, emailLink)
-          .then(result => {
-            if (!result || !result.ok) console.warn('HOD promotion email not sent or returned false:', result);
-          })
-          .catch(err => console.error('HOD promotion email send error:', err));
-      }
-
       return res.json({ message: 'User role updated', user });
     } catch (err) {
       console.error('setRole error', err);
@@ -349,6 +336,12 @@ exports.addUserByEmail = [
     try {
       const { email, role, is_admin, preview } = req.body;
       if (!email) return res.status(400).json({ message: 'email is required' });
+
+      if (role === 'hod') {
+        return res.status(400).json({
+          message: 'The Head of Department (HOD) role cannot be assigned directly in User Management. It is assigned automatically when a user is appointed as Department Head in Department Management.'
+        });
+      }
 
       // Search LDAP by email
       const ldapUrl = process.env.LDAP_SERVER;
@@ -419,23 +412,6 @@ exports.addUserByEmail = [
         await user.update(updates);
       }
 
-      // If role is hod, update department table and department_hods join table
-      if (role === 'hod' && user.department) {
-        const Department = require('../models/Department');
-        const DepartmentHOD = require('../models/DepartmentHOD');
-        const dept = await Department.findOne({ where: { name: user.department } });
-        if (dept) {
-          if (DepartmentHOD) {
-            await DepartmentHOD.findOrCreate({
-              where: { department_id: dept.id, user_id: user.id }
-            });
-          }
-          if (!dept.hod_user_id) {
-            await dept.update({ hod_user_id: user.id });
-          }
-        }
-      }
-
       return res.status(201).json({ message: 'User added successfully', user });
     } catch (err) {
       console.error('addUserByEmail error', err);
@@ -491,7 +467,7 @@ exports.addApprover = [
       const user = await User.findByPk(user_id);
       if (!user) return res.status(404).json({ message: 'User not found' });
 
-      await user.update({ is_approver: true });
+      await user.update({ is_approver: true, is_active: true });
 
       return res.json({ message: `${user.display_name || user.username} added as an approver.`, user });
     } catch (err) {
