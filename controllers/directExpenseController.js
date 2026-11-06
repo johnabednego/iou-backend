@@ -188,7 +188,7 @@ exports.listDirectExpenses = [
           if (deptNames.length > 0) {
             userVisibilityCond.push({ department: { [Op.in]: deptNames } });
           }
-        } catch (_) {}
+        } catch (_) { }
 
         if (where[Op.or]) {
           const searchCond = where[Op.or];
@@ -767,7 +767,7 @@ exports.disburse = [
         return res.status(400).json({ message: `Cannot disburse Direct Expense in status ${de.status}` });
       }
 
-      const { amount, payment_method, payment_reference, notes } = req.body;
+      const { amount, payment_method, payment_reference, notes, ifs_voucher_number } = req.body;
       if (!amount) { await t.rollback(); return res.status(400).json({ message: 'amount is required' }); }
 
       const disbursement = await Disbursement.create({
@@ -811,7 +811,11 @@ exports.disburse = [
         notes: `Disbursement for Direct Expense ${de.request_number}`
       }, { transaction: t });
 
-      await de.update({ status: 'DISBURSED' }, { transaction: t });
+      const deUpdates = { status: 'DISBURSED' };
+      if (ifs_voucher_number && ifs_voucher_number.trim()) {
+        deUpdates.ifs_voucher_number = ifs_voucher_number.trim();
+      }
+      await de.update(deUpdates, { transaction: t });
 
       await auditService.log({
         actorId: actor.id,
@@ -843,7 +847,7 @@ exports.disburse = [
 
       return res.json({ message: 'Direct Expense disbursed', disbursement, de_status: 'DISBURSED' });
     } catch (err) {
-      try { await t.rollback(); } catch (_) {}
+      try { await t.rollback(); } catch (_) { }
       console.error('disburse (DE) error', err);
       return res.status(500).json({ message: 'Error disbursing Direct Expense' });
     }
@@ -863,12 +867,22 @@ exports.confirmDisbursement = [
       if (!actor) { await t.rollback(); return res.status(401).json({ message: 'Not authenticated' }); }
 
       const { id } = req.params;
+      const { ifs_voucher_number } = req.body || {};
+
       const de = await DirectExpenseRequest.findByPk(id, { transaction: t });
       if (!de) { await t.rollback(); return res.status(404).json({ message: 'Direct Expense not found' }); }
 
-      if (de.requester_id !== actor.id && !actor.is_admin) {
+      const voucherNumber = (ifs_voucher_number && ifs_voucher_number.trim()) || de.ifs_voucher_number;
+      if (!voucherNumber) {
         await t.rollback();
-        return res.status(403).json({ message: 'Only the requester can confirm disbursement receipt' });
+        return res.status(400).json({ message: 'IFS Voucher Number is required to complete the Direct Expense.' });
+      }
+
+      const isOwner = de.requester_id === actor.id;
+      const isCashier = actor.is_admin || actor.role === 'cashier';
+      if (!isOwner && !isCashier) {
+        await t.rollback();
+        return res.status(403).json({ message: 'Only the requester, cashier, or admin can confirm disbursement receipt' });
       }
 
       if (de.status !== 'DISBURSED') {
@@ -890,7 +904,7 @@ exports.confirmDisbursement = [
       }
 
       // COMPLETED is the final status for Direct Expense (no expense submission or reconciliation)
-      await de.update({ status: 'COMPLETED' }, { transaction: t });
+      await de.update({ status: 'COMPLETED', ifs_voucher_number: voucherNumber.trim() }, { transaction: t });
 
       await auditService.log({
         actorId: actor.id,
@@ -898,7 +912,7 @@ exports.confirmDisbursement = [
         action: 'CONFIRM_DISBURSEMENT',
         entity: 'DIRECT_EXPENSE',
         entityId: de.id,
-        details: { disbursement_id: disbursement?.id }
+        details: { disbursement_id: disbursement?.id, ifs_voucher_number: voucherNumber.trim() }
       }, { transaction: t });
 
       // Notify cashiers
@@ -930,7 +944,7 @@ exports.confirmDisbursement = [
 
       return res.json({ message: 'Direct Expense completed', de_status: 'COMPLETED' });
     } catch (err) {
-      try { await t.rollback(); } catch (_) {}
+      try { await t.rollback(); } catch (_) { }
       console.error('confirmDisbursement (DE) error', err);
       return res.status(500).json({ message: 'Error confirming disbursement' });
     }

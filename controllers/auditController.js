@@ -2,6 +2,7 @@
 const AuditLog = require('../models/AuditLog');
 const User = require('../models/User');
 const IOURequest = require('../models/IOURequest');
+const DirectExpenseRequest = require('../models/DirectExpenseRequest');
 const ReconciliationRecord = require('../models/ReconciliationRecord');
 const { Op } = require('sequelize');
 
@@ -44,10 +45,22 @@ exports.listAuditLogs = [
           attributes: ['iou_id']
         });
 
+        const matchingDes = await DirectExpenseRequest.findAll({
+          where: {
+            [Op.or]: [
+              { ifs_voucher_number: { [Op.like]: `%${search}%` } },
+              { request_number: { [Op.like]: `%${search}%` } }
+            ]
+          },
+          attributes: ['id']
+        });
+
         const iouIds = [...new Set([
           ...matchingIous.map(i => i.id),
           ...matchingRecons.map(r => r.iou_id)
         ])].filter(Boolean);
+
+        const deIds = matchingDes.map(d => d.id).filter(Boolean);
 
         const searchOr = [
           { details: { [Op.like]: `%${search}%` } },
@@ -60,6 +73,15 @@ exports.listAuditLogs = [
             [Op.and]: [
               { entity: 'IOU' },
               { entity_id: { [Op.in]: iouIds } }
+            ]
+          });
+        }
+
+        if (deIds.length > 0) {
+          searchOr.push({
+            [Op.and]: [
+              { entity: 'DIRECT_EXPENSE' },
+              { entity_id: { [Op.in]: deIds } }
             ]
           });
         }

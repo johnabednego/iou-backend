@@ -29,14 +29,23 @@ const setupSwaggerDocs = require('./config/swagger');
 
 const app = express();
 
-// Build CORS allowed origins - include Smart Workplace frontend for SSO
-const corsOrigins = [
-  'http://localhost:3002',
-  'http://172.20.24.134:3002',
-  'http://mpslocappsvr.mpsgh.com:3002',
-];
+// Build CORS allowed origins from .env (comma-separated) - required for security
+const rawCorsOrigins = process.env.CORS_ORIGINS || process.env.CORS_ALLOWED_ORIGINS || process.env.CORS_ORIGIN;
+if (!rawCorsOrigins || !rawCorsOrigins.trim()) {
+  throw new Error('FATAL: CORS_ORIGINS is not defined in the environment. Please configure CORS_ORIGINS in .env to prevent unauthorized cross-origin access.');
+}
+
+const corsOrigins = rawCorsOrigins
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
+if (corsOrigins.length === 0) {
+  throw new Error('FATAL: CORS_ORIGINS in .env contains no valid origins.');
+}
+
 // If SWP_API_URL is set, also allow the SWP origin (for cross-origin SSO)
-if (process.env.SWP_API_URL) {
+if (process.env.SWP_API_URL && !corsOrigins.includes(process.env.SWP_API_URL)) {
   corsOrigins.push(process.env.SWP_API_URL);
 }
 
