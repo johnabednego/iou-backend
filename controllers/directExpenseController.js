@@ -1094,14 +1094,30 @@ exports.cashierRejectDE = [
       const de = await DirectExpenseRequest.findByPk(id, { transaction: t });
       if (!de) { await t.rollback(); return res.status(404).json({ message: 'Direct Expense not found' }); }
 
-      if (de.status !== 'PENDING_HOD_ASSIGNMENT') {
+      const allowedRejectStatuses = ['PENDING_HOD_ASSIGNMENT', 'PENDING', 'APPROVED_FOR_DISBURSEMENT'];
+      if (!allowedRejectStatuses.includes(de.status)) {
         await t.rollback();
         return res.status(400).json({
-          message: `Cannot reject Direct Expense in status "${de.status}". Only requests awaiting approver assignment can be rejected here.`
+          message: `Cannot reject Direct Expense in status "${de.status}". Only requests prior to disbursement can be rejected.`
         });
       }
 
-      await de.update({ status: 'REJECTED' }, { transaction: t });
+      // Find all approvers that were assigned
+      const existingApprovals = await Approval.findAll({
+        where: { direct_expense_id: de.id, approval_type: 'direct_expense' },
+        attributes: ['approver_id'],
+        transaction: t
+      });
+      const approverIds = [...new Set(existingApprovals.map(a => a.approver_id).filter(Boolean))];
+
+      await Approval.destroy({ where: { direct_expense_id: de.id, approval_type: 'direct_expense', decision: 'PENDING' }, transaction: t });
+
+      const meta = de.metadata ? (typeof de.metadata === 'object' ? { ...de.metadata } : JSON.parse(de.metadata)) : {};
+      meta.last_rejected_by = actor.display_name || actor.username;
+      meta.last_rejected_reason = comments;
+      meta.last_rejected_at = new Date().toISOString();
+
+      await de.update({ status: 'REJECTED', metadata: meta }, { transaction: t });
 
       const note = await notificationService.createNotification({
         target_user_id: de.requester_id,
@@ -1113,13 +1129,27 @@ exports.cashierRejectDE = [
       }, { transaction: t });
       emailsToSend.push({ note, target_user_id: de.requester_id });
 
+      // Notify assigned approvers
+      for (const appUserId of approverIds) {
+        if (String(appUserId) === String(de.requester_id)) continue;
+        const aNote = await notificationService.createNotification({
+          target_user_id: appUserId,
+          title: `Direct Expense Rejected: ${de.request_number}`,
+          body: `Direct Expense ${de.request_number} in your approval queue has been rejected by Cashier ${actor.display_name || actor.username}. Reason: ${comments}`,
+          link: `/direct-expenses/${de.id}`,
+          entity: 'DIRECT_EXPENSE',
+          entity_id: de.id
+        }, { transaction: t });
+        emailsToSend.push({ note: aNote, target_user_id: appUserId });
+      }
+
       await auditService.log({
         actorId: actor.id,
         actorName: actor.display_name || actor.username,
         action: 'CASHIER_REJECT_DIRECT_EXPENSE',
         entity: 'DIRECT_EXPENSE',
         entityId: de.id,
-        details: { request_number: de.request_number, comments }
+        details: { request_number: de.request_number, previous_status: de.status, comments }
       }, { transaction: t });
 
       await t.commit();
@@ -1145,7 +1175,9 @@ exports.cashierRejectDE = [
 
 /**
  * POST /api/direct-expenses/:id/cashier-return
- * Cashier/admin returns a Direct Expense for edits at PENDING_HOD_ASSIGNMENT stage
+ * Cashier/admin returns a Direct Expense for edits at ANY stage prior to disbursement.
+ * Allowed statuses: PENDING_HOD_ASSIGNMENT, PENDING, APPROVED_FOR_DISBURSEMENT
+ * Resets approval chain and notifies assigned approvers.
  */
 exports.cashierReturnDE = [
   async (req, res) => {
@@ -1169,16 +1201,31 @@ exports.cashierReturnDE = [
       const de = await DirectExpenseRequest.findByPk(id, { transaction: t });
       if (!de) { await t.rollback(); return res.status(404).json({ message: 'Direct Expense not found' }); }
 
-      if (de.status !== 'PENDING_HOD_ASSIGNMENT') {
+      const allowedReturnStatuses = ['PENDING_HOD_ASSIGNMENT', 'PENDING', 'APPROVED_FOR_DISBURSEMENT'];
+      if (!allowedReturnStatuses.includes(de.status)) {
         await t.rollback();
         return res.status(400).json({
-          message: `Cannot return Direct Expense in status "${de.status}". Only requests awaiting approver assignment can be returned here.`
+          message: `Cannot return Direct Expense in status "${de.status}". Only requests prior to disbursement can be returned for edits.`
         });
       }
 
-      await Approval.destroy({ where: { direct_expense_id: de.id, approval_type: 'direct_expense', decision: 'PENDING' }, transaction: t });
+      // Find all approvers that were assigned
+      const existingApprovals = await Approval.findAll({
+        where: { direct_expense_id: de.id, approval_type: 'direct_expense' },
+        attributes: ['approver_id'],
+        transaction: t
+      });
+      const approverIds = [...new Set(existingApprovals.map(a => a.approver_id).filter(Boolean))];
 
-      await de.update({ status: 'RETURNED' }, { transaction: t });
+      // Clear all approval rows so on re-submission the approval process starts fresh
+      await Approval.destroy({ where: { direct_expense_id: de.id, approval_type: 'direct_expense' }, transaction: t });
+
+      const meta = de.metadata ? (typeof de.metadata === 'object' ? { ...de.metadata } : JSON.parse(de.metadata)) : {};
+      meta.last_returned_by = actor.display_name || actor.username;
+      meta.last_returned_reason = comments;
+      meta.last_returned_at = new Date().toISOString();
+
+      await de.update({ status: 'RETURNED', metadata: meta }, { transaction: t });
 
       const note = await notificationService.createNotification({
         target_user_id: de.requester_id,
@@ -1190,13 +1237,27 @@ exports.cashierReturnDE = [
       }, { transaction: t });
       emailsToSend.push({ note, target_user_id: de.requester_id });
 
+      // Notify assigned approvers
+      for (const appUserId of approverIds) {
+        if (String(appUserId) === String(de.requester_id)) continue;
+        const aNote = await notificationService.createNotification({
+          target_user_id: appUserId,
+          title: `Direct Expense Returned for Edits: ${de.request_number}`,
+          body: `Direct Expense ${de.request_number} which was in your approval workflow has been returned for edits by Cashier ${actor.display_name || actor.username}. Reason: ${comments}. The approval process will restart once re-submitted.`,
+          link: `/direct-expenses/${de.id}`,
+          entity: 'DIRECT_EXPENSE',
+          entity_id: de.id
+        }, { transaction: t });
+        emailsToSend.push({ note: aNote, target_user_id: appUserId });
+      }
+
       await auditService.log({
         actorId: actor.id,
         actorName: actor.display_name || actor.username,
         action: 'CASHIER_RETURN_DIRECT_EXPENSE',
         entity: 'DIRECT_EXPENSE',
         entityId: de.id,
-        details: { request_number: de.request_number, comments }
+        details: { request_number: de.request_number, previous_status: de.status, comments }
       }, { transaction: t });
 
       await t.commit();

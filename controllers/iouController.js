@@ -870,14 +870,31 @@ exports.cashierRejectIOU = [
       const iou = await IOURequest.findByPk(id, { transaction: t });
       if (!iou) { await t.rollback(); return res.status(404).json({ message: 'IOU not found' }); }
 
-      if (iou.status !== 'PENDING_HOD_ASSIGNMENT') {
+      const allowedRejectStatuses = ['PENDING_HOD_ASSIGNMENT', 'PENDING', 'APPROVED_FOR_DISBURSEMENT'];
+      if (!allowedRejectStatuses.includes(iou.status)) {
         await t.rollback();
         return res.status(400).json({
-          message: `Cannot reject IOU in status "${iou.status}". Only IOUs awaiting approver assignment can be rejected here.`
+          message: `Cannot reject IOU in status "${iou.status}". Only IOUs prior to disbursement can be rejected.`
         });
       }
 
-      await iou.update({ status: 'REJECTED' }, { transaction: t });
+      // Find all approvers that were assigned
+      const existingApprovals = await Approval.findAll({
+        where: { iou_id: iou.id, approval_type: 'iou' },
+        attributes: ['approver_id'],
+        transaction: t
+      });
+      const approverIds = [...new Set(existingApprovals.map(a => a.approver_id).filter(Boolean))];
+
+      // Remove any pending approval rows
+      await Approval.destroy({ where: { iou_id: iou.id, approval_type: 'iou', decision: 'PENDING' }, transaction: t });
+
+      const meta = iou.metadata ? (typeof iou.metadata === 'object' ? { ...iou.metadata } : JSON.parse(iou.metadata)) : {};
+      meta.last_rejected_by = actor.display_name || actor.username;
+      meta.last_rejected_reason = comments;
+      meta.last_rejected_at = new Date().toISOString();
+
+      await iou.update({ status: 'REJECTED', metadata: meta }, { transaction: t });
 
       // Notify requester
       const note = await notificationService.createNotification({
@@ -890,13 +907,27 @@ exports.cashierRejectIOU = [
       }, { transaction: t });
       emailsToSend.push({ note, target_user_id: iou.requester_id });
 
+      // Notify assigned approvers
+      for (const appUserId of approverIds) {
+        if (String(appUserId) === String(iou.requester_id)) continue;
+        const aNote = await notificationService.createNotification({
+          target_user_id: appUserId,
+          title: `IOU Rejected: ${iou.request_number}`,
+          body: `IOU ${iou.request_number} in your approval queue has been rejected by Cashier ${actor.display_name || actor.username}. Reason: ${comments}`,
+          link: `/ious/${iou.id}`,
+          entity: 'IOU',
+          entity_id: iou.id
+        }, { transaction: t });
+        emailsToSend.push({ note: aNote, target_user_id: appUserId });
+      }
+
       await auditService.log({
         actorId: actor.id,
         actorName: actor.display_name || actor.username,
         action: 'CASHIER_REJECT_IOU',
         entity: 'IOU',
         entityId: iou.id,
-        details: { request_number: iou.request_number, comments }
+        details: { request_number: iou.request_number, previous_status: iou.status, comments }
       }, { transaction: t });
 
       await t.commit();
@@ -922,8 +953,10 @@ exports.cashierRejectIOU = [
 
 /**
  * POST /api/ious/:id/cashier-return
- * Cashier/admin returns an IOU for edits before any approvers are assigned.
- * Status: PENDING_HOD_ASSIGNMENT → RETURNED  (requester can edit and re-submit)
+ * Cashier/admin returns an IOU for edits at ANY stage prior to disbursement.
+ * Allowed statuses: PENDING_HOD_ASSIGNMENT, PENDING, APPROVED_FOR_DISBURSEMENT
+ * Status: → RETURNED (requester can edit and re-submit)
+ * Assigned approvers are notified and approval records are reset so approvals happen again on re-submission.
  * Requires a non-empty comments field.
  */
 exports.cashierReturnIOU = [
@@ -948,17 +981,31 @@ exports.cashierReturnIOU = [
       const iou = await IOURequest.findByPk(id, { transaction: t });
       if (!iou) { await t.rollback(); return res.status(404).json({ message: 'IOU not found' }); }
 
-      if (iou.status !== 'PENDING_HOD_ASSIGNMENT') {
+      const allowedReturnStatuses = ['PENDING_HOD_ASSIGNMENT', 'PENDING', 'APPROVED_FOR_DISBURSEMENT'];
+      if (!allowedReturnStatuses.includes(iou.status)) {
         await t.rollback();
         return res.status(400).json({
-          message: `Cannot return IOU in status "${iou.status}". Only IOUs awaiting approver assignment can be returned here.`
+          message: `Cannot return IOU in status "${iou.status}". Only requests prior to disbursement can be returned for edits.`
         });
       }
 
-      // Clear any stale pending approval rows from previous submissions
-      await Approval.destroy({ where: { iou_id: iou.id, approval_type: 'iou', decision: 'PENDING' }, transaction: t });
+      // Find all approvers that were assigned to this IOU
+      const existingApprovals = await Approval.findAll({
+        where: { iou_id: iou.id, approval_type: 'iou' },
+        attributes: ['approver_id'],
+        transaction: t
+      });
+      const approverIds = [...new Set(existingApprovals.map(a => a.approver_id).filter(Boolean))];
 
-      await iou.update({ status: 'RETURNED' }, { transaction: t });
+      // Clear all approval rows so on re-submission the approval process starts fresh
+      await Approval.destroy({ where: { iou_id: iou.id, approval_type: 'iou' }, transaction: t });
+
+      const meta = iou.metadata ? (typeof iou.metadata === 'object' ? { ...iou.metadata } : JSON.parse(iou.metadata)) : {};
+      meta.last_returned_by = actor.display_name || actor.username;
+      meta.last_returned_reason = comments;
+      meta.last_returned_at = new Date().toISOString();
+
+      await iou.update({ status: 'RETURNED', metadata: meta }, { transaction: t });
 
       // Notify requester
       const note = await notificationService.createNotification({
@@ -971,13 +1018,27 @@ exports.cashierReturnIOU = [
       }, { transaction: t });
       emailsToSend.push({ note, target_user_id: iou.requester_id });
 
+      // Notify all assigned approvers
+      for (const appUserId of approverIds) {
+        if (String(appUserId) === String(iou.requester_id)) continue;
+        const aNote = await notificationService.createNotification({
+          target_user_id: appUserId,
+          title: `IOU Returned for Edits: ${iou.request_number}`,
+          body: `IOU ${iou.request_number} which was in your approval workflow has been returned for edits by Cashier ${actor.display_name || actor.username}. Reason: ${comments}. The approval process will restart once re-submitted.`,
+          link: `/ious/${iou.id}`,
+          entity: 'IOU',
+          entity_id: iou.id
+        }, { transaction: t });
+        emailsToSend.push({ note: aNote, target_user_id: appUserId });
+      }
+
       await auditService.log({
         actorId: actor.id,
         actorName: actor.display_name || actor.username,
         action: 'CASHIER_RETURN_IOU',
         entity: 'IOU',
         entityId: iou.id,
-        details: { request_number: iou.request_number, comments }
+        details: { request_number: iou.request_number, previous_status: iou.status, comments }
       }, { transaction: t });
 
       await t.commit();

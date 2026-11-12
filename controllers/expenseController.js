@@ -264,6 +264,7 @@ exports.getExpense = [
 exports.rejectExpense = [
   async (req, res) => {
     const t = await sequelize.transaction();
+    const emailsToSend = [];
     try {
       const actor = req.currentUser;
       if (!actor) { await t.rollback(); return res.status(401).json({ message: 'Not authenticated' }); }
@@ -273,25 +274,36 @@ exports.rejectExpense = [
       }
 
       const { id } = req.params;
+      const { reason, comments } = req.body;
+      const returnReason = (comments || reason || '').trim();
+      if (!returnReason) {
+        await t.rollback();
+        return res.status(400).json({ message: 'A reason/comment is required to return an expense' });
+      }
+
       const iou = await IOURequest.findByPk(id, { transaction: t });
       if (!iou) { await t.rollback(); return res.status(404).json({ message: 'IOU not found' }); }
 
       const expense = await ExpenseSubmission.findOne({ where: { iou_id: iou.id }, transaction: t });
       if (!expense) { await t.rollback(); return res.status(400).json({ message: 'No expense submission found' }); }
 
-      if (expense.status === 'APPROVED') {
+      if (['RECONCILED', 'RETURNED'].includes(expense.status) || iou.status === 'RECONCILED') {
         await t.rollback();
-        return res.status(400).json({ message: 'Cannot reject an expense that has already been approved.' });
+        return res.status(400).json({ message: `Cannot return expense in status ${expense.status}. Only un-reconciled expenses can be returned.` });
       }
 
-      if (!['SUBMITTED', 'PENDING_REVIEW'].includes(expense.status) && !actor.is_admin) {
-        await t.rollback();
-        return res.status(400).json({ message: `Cannot reject expense in status ${expense.status}` });
-      }
+      // Find all approvers that were assigned to this expense
+      const existingApprovals = await Approval.findAll({
+        where: { iou_id: iou.id, approval_type: 'expense' },
+        attributes: ['approver_id'],
+        transaction: t
+      });
+      const approverIds = [...new Set(existingApprovals.map(a => a.approver_id).filter(Boolean))];
 
-      const { reason, comments } = req.body;
+      // Reset approvals so upon re-submission the approval cycle starts fresh
+      await Approval.destroy({ where: { iou_id: iou.id, approval_type: 'expense' }, transaction: t });
 
-      await expense.update({ status: 'RETURNED', notes: comments || reason || expense.notes }, { transaction: t });
+      await expense.update({ status: 'RETURNED', notes: returnReason }, { transaction: t });
       await iou.update({ status: 'EXPENSE_RETURNED' }, { transaction: t });
 
       await auditService.log({
@@ -300,29 +312,48 @@ exports.rejectExpense = [
         action: 'REJECT_EXPENSE',
         entity: 'IOU',
         entityId: iou.id,
-        details: { expense_id: expense.id, reason: reason || comments }
+        details: { expense_id: expense.id, reason: returnReason }
       }, { transaction: t });
 
       // Notify requester
       const note = await notificationService.createNotification({
         target_user_id: iou.requester_id,
         title: `Expense Returned: ${iou.request_number}`,
-        body: `Your expense for IOU ${iou.request_number} was returned by ${actor.display_name || actor.username}. Reason: ${reason || comments || 'No reason given'}. Please edit and re-submit.`,
+        body: `Your expense for IOU ${iou.request_number} was returned by ${actor.display_name || actor.username}. Reason: ${returnReason}. Please edit and re-submit.`,
         link: `/ious/${iou.id}`,
         entity: 'IOU',
         entity_id: iou.id
       }, { transaction: t });
+      emailsToSend.push({ note, target_user_id: iou.requester_id });
+
+      // Notify all assigned expense approvers
+      for (const appUserId of approverIds) {
+        if (String(appUserId) === String(iou.requester_id)) continue;
+        const aNote = await notificationService.createNotification({
+          target_user_id: appUserId,
+          title: `Expense Returned: ${iou.request_number}`,
+          body: `Expense submission for IOU ${iou.request_number} has been returned for edits by Cashier ${actor.display_name || actor.username}. Reason: ${returnReason}. The expense review process will restart once re-submitted.`,
+          link: `/ious/${iou.id}`,
+          entity: 'IOU',
+          entity_id: iou.id
+        }, { transaction: t });
+        emailsToSend.push({ note: aNote, target_user_id: appUserId });
+      }
 
       await t.commit();
 
       // Send email
       (async () => {
-        try {
-          await emailService.sendNotificationEmailForUser(iou.requester_id, note.title, note.body, note.link);
-        } catch (err) { console.error('sendMail error:', err.message || err); }
+        for (const it of emailsToSend) {
+          try {
+            await emailService.sendNotificationEmailForUser(it.target_user_id, it.note.title, it.note.body, it.note.link);
+          } catch (err) {
+            console.error('sendMail error:', err.message || err);
+          }
+        }
       })();
 
-      return res.json({ message: 'Expense rejected and returned to requester', expense });
+      return res.json({ message: 'Expense returned for edits successfully.', expense });
     } catch (err) {
       try { await t.rollback(); } catch (_) { }
       console.error('rejectExpense error:', err.message);
