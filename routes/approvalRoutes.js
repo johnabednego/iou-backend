@@ -1,7 +1,7 @@
 // routes/approvalRoutes.js
 const express = require('express');
 const router = express.Router();
-const { decideApproval, listMine } = require('../controllers/approvalController');
+const { decideApproval, listMine, removeApproval } = require('../controllers/approvalController');
 const { isAuthenticated } = require('../middleware/auth');
 
 /**
@@ -107,5 +107,43 @@ router.get('/mine', isAuthenticated, listMine);
  *         description: Server error
  */
 router.put('/:id', isAuthenticated, decideApproval);
+
+/**
+ * @swagger
+ * /approvals/{id}:
+ *   delete:
+ *     summary: Remove a PENDING approver from the approval chain (cashier/admin only)
+ *     tags: [Approvals]
+ *     security:
+ *       - cookieAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         description: Approval UUID
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [comments]
+ *             properties:
+ *               comments:
+ *                 type: string
+ *                 description: Reason for removal (sent to removed approver via email)
+ *     responses:
+ *       '200':
+ *         description: Approver removed successfully
+ *       '400':
+ *         description: Approval already decided or missing comment
+ *       '403':
+ *         description: Only cashier/admin can remove
+ *       '404':
+ *         description: Approval not found
+ */
+router.delete('/:id', isAuthenticated, removeApproval);
 
 module.exports = router;

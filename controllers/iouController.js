@@ -566,6 +566,13 @@ exports.assignApprovers = [
       const iou = await IOURequest.findByPk(id, { transaction: t });
       if (!iou) { await t.rollback(); return res.status(404).json({ message: 'IOU not found' }); }
 
+      // Block assignment only at terminal states
+      const blockedStatuses = ['DRAFT', 'REJECTED', 'REDEEMED'];
+      if (blockedStatuses.includes(iou.status)) {
+        await t.rollback();
+        return res.status(400).json({ message: `Cannot assign approvers when IOU is in ${iou.status} status` });
+      }
+
       if (!Array.isArray(approvers) || approvers.length === 0) {
         await t.rollback();
         return res.status(400).json({ message: 'At least one approver is required' });

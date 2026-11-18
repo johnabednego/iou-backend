@@ -486,6 +486,175 @@ exports.decideApproval = [
  * List pending approvals assigned to the current user
  */
 
+/**
+ * DELETE /api/approvals/:id
+ * Cashier/admin removes a PENDING approver from the approval chain.
+ * body: { comments } (required - reason for removal, emailed to removed approver)
+ */
+exports.removeApproval = [
+  async (req, res) => {
+    const t = await sequelize.transaction();
+    const emailsToSend = [];
+    try {
+      const actor = req.currentUser;
+      if (!actor) { await t.rollback(); return res.status(401).json({ message: 'Not authenticated' }); }
+      if (!actor.is_admin && actor.role !== 'cashier') {
+        await t.rollback();
+        return res.status(403).json({ message: 'Only cashier or admin can remove approvers' });
+      }
+
+      const { id } = req.params;
+      const { comments } = req.body;
+      if (!comments || !comments.trim()) {
+        await t.rollback();
+        return res.status(400).json({ message: 'A reason/comment is required when removing an approver' });
+      }
+
+      const approval = await Approval.findByPk(id, { transaction: t });
+      if (!approval) { await t.rollback(); return res.status(404).json({ message: 'Approval not found' }); }
+
+      if (approval.decision !== 'PENDING') {
+        await t.rollback();
+        return res.status(400).json({ message: 'Only PENDING approvals can be removed. This approval has already been decided.' });
+      }
+
+      // Determine the linked request
+      let requestEntity, requestEntityId, requestNumber, requestLink;
+      if (approval.approval_type === 'direct_expense' && DirectExpenseRequest) {
+        const deReq = await DirectExpenseRequest.findByPk(approval.direct_expense_id, { transaction: t });
+        if (!deReq) { await t.rollback(); return res.status(500).json({ message: 'Linked Direct Expense not found' }); }
+        requestEntity = 'DIRECT_EXPENSE';
+        requestEntityId = deReq.id;
+        requestNumber = deReq.request_number;
+        requestLink = `/direct-expenses/${deReq.id}`;
+      } else {
+        const iou = await IOURequest.findByPk(approval.iou_id, { transaction: t });
+        if (!iou) { await t.rollback(); return res.status(500).json({ message: 'Linked IOU not found' }); }
+        requestEntity = 'IOU';
+        requestEntityId = iou.id;
+        requestNumber = iou.request_number;
+        requestLink = `/ious/${iou.id}`;
+      }
+
+      // Check if this was the CURRENT active approver (first pending in sequence)
+      const seqWhereBase = approval.approval_type === 'direct_expense'
+        ? { direct_expense_id: approval.direct_expense_id }
+        : { iou_id: approval.iou_id };
+      const earlierPending = await Approval.findOne({
+        where: {
+          ...seqWhereBase,
+          approval_type: approval.approval_type || 'iou',
+          decision: 'PENDING',
+          step_order: { [Op.lt]: approval.step_order }
+        },
+        transaction: t
+      });
+      const wasCurrentApprover = !earlierPending;
+
+      const removedApproverId = approval.approver_id;
+      const removedStepOrder = approval.step_order;
+
+      // Delete the approval record
+      await approval.destroy({ transaction: t });
+
+      // Resequence remaining PENDING approvals
+      const remainingPending = await Approval.findAll({
+        where: {
+          ...seqWhereBase,
+          approval_type: approval.approval_type || 'iou',
+          decision: 'PENDING'
+        },
+        order: [['step_order', 'ASC']],
+        transaction: t
+      });
+
+      // Get max decided step order
+      const decidedApprovals = await Approval.findAll({
+        where: {
+          ...seqWhereBase,
+          approval_type: approval.approval_type || 'iou',
+          decision: { [Op.ne]: 'PENDING' }
+        },
+        transaction: t
+      });
+      const maxDecidedStep = decidedApprovals.reduce((max, a) => Math.max(max, a.step_order), 0);
+
+      // Resequence
+      for (let i = 0; i < remainingPending.length; i++) {
+        const newStep = maxDecidedStep + 1 + i;
+        if (remainingPending[i].step_order !== newStep) {
+          await remainingPending[i].update({ step_order: newStep }, { transaction: t });
+        }
+      }
+
+      // If the removed approver was the current active one, notify the NEXT approver
+      if (wasCurrentApprover && remainingPending.length > 0) {
+        const nextApprover = remainingPending[0];
+        const labelPrefix = approval.approval_type === 'direct_expense' ? 'Direct Expense approval'
+          : approval.approval_type === 'expense' ? 'Expense approval' : 'Approval';
+        const note = await notificationService.createNotification({
+          target_user_id: nextApprover.approver_id,
+          title: `${labelPrefix} required: ${requestNumber}`,
+          body: `A previous approver was removed. It is now your turn to review ${requestNumber}.`,
+          link: requestLink,
+          entity: requestEntity,
+          entity_id: requestEntityId
+        }, { transaction: t });
+        emailsToSend.push({ note, target_user_id: nextApprover.approver_id });
+      }
+
+      // Audit
+      await auditService.log({
+        actorId: actor.id,
+        actorName: actor.display_name || actor.username,
+        action: 'REMOVE_APPROVER',
+        entity: 'APPROVAL',
+        entityId: id,
+        details: {
+          removed_approver_id: removedApproverId,
+          removed_step_order: removedStepOrder,
+          approval_type: approval.approval_type,
+          request_number: requestNumber,
+          reason: comments
+        }
+      });
+
+      await t.commit();
+
+      // After commit: send email to the removed approver with the reason
+      (async () => {
+        try {
+          const labelPrefix = approval.approval_type === 'direct_expense' ? 'Direct Expense'
+            : approval.approval_type === 'expense' ? 'Expense' : 'IOU';
+          await emailService.sendNotificationEmailForUser(
+            removedApproverId,
+            `Removed from ${labelPrefix} approval: ${requestNumber}`,
+            `You have been removed from the approval chain for ${labelPrefix} ${requestNumber} by ${actor.display_name || actor.username}. Reason: ${comments}`,
+            requestLink
+          );
+        } catch (err) {
+          console.error('Error sending removal notification email', err);
+        }
+        // Also send any next-approver notifications
+        for (const item of emailsToSend) {
+          try {
+            await emailService.sendNotificationEmailForUser(item.target_user_id, item.note.title, item.note.body, item.note.link);
+          } catch (err) {
+            console.error('Error sending next-approver notification email', err);
+          }
+        }
+      })();
+
+      return res.json({ message: 'Approver removed successfully' });
+    } catch (err) {
+      try { await t.rollback(); } catch (_) {}
+      console.error('removeApproval error', err);
+      return res.status(500).json({ message: 'Error removing approver' });
+    }
+  }
+];
+
+
 exports.listMine = [
   async (req, res) => {
     try {

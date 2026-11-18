@@ -486,6 +486,13 @@ exports.assignApprovers = [
       const de = await DirectExpenseRequest.findByPk(id, { transaction: t });
       if (!de) { await t.rollback(); return res.status(404).json({ message: 'Direct Expense not found' }); }
 
+      // Block assignment only at terminal states
+      const deBlockedStatuses = ['DRAFT', 'REJECTED', 'COMPLETED'];
+      if (deBlockedStatuses.includes(de.status)) {
+        await t.rollback();
+        return res.status(400).json({ message: `Cannot assign approvers when Direct Expense is in ${de.status} status` });
+      }
+
       if (!Array.isArray(approvers) || approvers.length === 0) {
         await t.rollback();
         return res.status(400).json({ message: 'At least one approver is required' });

@@ -19,24 +19,32 @@ function createTransporter() {
     return null;
   }
 
-  // For Office365 with port 587: secure should be false (STARTTLS). requireTLS forces STARTTLS.
+  const isInternalRelay = (SMTP_PORT === 25);
+
   const opts = {
     host: SMTP_HOST,
     port: SMTP_PORT,
-    secure: SMTP_SECURE,
+    secure: SMTP_SECURE, // false for both port 25 (plain) and port 587 (STARTTLS)
+    // Only send auth if both user AND password are provided (internal relay has no password)
     auth: (SMTP_USER && SMTP_PASS) ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
-    requireTLS: true, // ensures STARTTLS is used where supported
-    tls: {
-      // prefer modern TLS
-      ciphers: 'TLSv1.2',
-      // In production do not disable certificate validation. For local dev you may set NODE_ENV=development
-      rejectUnauthorized: process.env.NODE_ENV === 'production' ? true : false
-    },
     // helpful timeouts
     connectionTimeout: 30_000,
     greetingTimeout: 30_000,
     socketTimeout: 30_000
   };
+
+  if (isInternalRelay) {
+    // Internal relay on port 25: no TLS, no auth required
+    opts.tls = { rejectUnauthorized: false };
+    opts.ignoreTLS = true; // do not attempt STARTTLS on internal relay
+  } else {
+    // External relay (e.g. Office365 port 587): require STARTTLS
+    opts.requireTLS = true;
+    opts.tls = {
+      ciphers: 'TLSv1.2',
+      rejectUnauthorized: process.env.NODE_ENV === 'production' ? true : false
+    };
+  }
 
   const t = nodemailer.createTransport(opts);
 
@@ -107,27 +115,27 @@ async function sendMail(opts = {}) {
  */
 function detectCategory(subject, body) {
   const s = ((subject || '') + ' ' + (body || '')).toLowerCase();
-  if (s.includes('rejected') || s.includes('reject'))   return 'rejected';
-  if (s.includes('returned') || s.includes('return'))    return 'returned';
+  if (s.includes('rejected') || s.includes('reject')) return 'rejected';
+  if (s.includes('returned') || s.includes('return')) return 'returned';
   if (s.includes('approved') || s.includes('approval confirmed') || s.includes('approve')) return 'approved';
-  if (s.includes('disburs'))                             return 'disbursed';
-  if (s.includes('reconcil'))                            return 'reconciled';
-  if (s.includes('redeem'))                              return 'redeemed';
-  if (s.includes('expense'))                             return 'expense';
-  if (s.includes('assign') || s.includes('required'))    return 'action';
+  if (s.includes('disburs')) return 'disbursed';
+  if (s.includes('reconcil')) return 'reconciled';
+  if (s.includes('redeem')) return 'redeemed';
+  if (s.includes('expense')) return 'expense';
+  if (s.includes('assign') || s.includes('required')) return 'action';
   return 'info';
 }
 
 const CATEGORY_STYLES = {
-  rejected:   { accent: '#dc2626', accentLight: '#fef2f2', icon: '✕', label: 'Rejected',   gradient: 'linear-gradient(135deg, #dc2626 0%, #991b1b 100%)' },
-  returned:   { accent: '#d97706', accentLight: '#fffbeb', icon: '↩',  label: 'Returned',   gradient: 'linear-gradient(135deg, #d97706 0%, #92400e 100%)' },
-  approved:   { accent: '#059669', accentLight: '#ecfdf5', icon: '✓', label: 'Approved',   gradient: 'linear-gradient(135deg, #059669 0%, #065f46 100%)' },
-  disbursed:  { accent: '#2563eb', accentLight: '#eff6ff', icon: '💰', label: 'Disbursed',  gradient: 'linear-gradient(135deg, #2563eb 0%, #1e40af 100%)' },
+  rejected: { accent: '#dc2626', accentLight: '#fef2f2', icon: '✕', label: 'Rejected', gradient: 'linear-gradient(135deg, #dc2626 0%, #991b1b 100%)' },
+  returned: { accent: '#d97706', accentLight: '#fffbeb', icon: '↩', label: 'Returned', gradient: 'linear-gradient(135deg, #d97706 0%, #92400e 100%)' },
+  approved: { accent: '#059669', accentLight: '#ecfdf5', icon: '✓', label: 'Approved', gradient: 'linear-gradient(135deg, #059669 0%, #065f46 100%)' },
+  disbursed: { accent: '#2563eb', accentLight: '#eff6ff', icon: '💰', label: 'Disbursed', gradient: 'linear-gradient(135deg, #2563eb 0%, #1e40af 100%)' },
   reconciled: { accent: '#0d9488', accentLight: '#f0fdfa', icon: '📋', label: 'Reconciled', gradient: 'linear-gradient(135deg, #0d9488 0%, #115e59 100%)' },
-  redeemed:   { accent: '#16a34a', accentLight: '#f0fdf4', icon: '🎉', label: 'Redeemed',   gradient: 'linear-gradient(135deg, #16a34a 0%, #14532d 100%)' },
-  expense:    { accent: '#7c3aed', accentLight: '#f5f3ff', icon: '📄', label: 'Expense',    gradient: 'linear-gradient(135deg, #7c3aed 0%, #4c1d95 100%)' },
-  action:     { accent: '#2563eb', accentLight: '#eff6ff', icon: '🔔', label: 'Action Required', gradient: 'linear-gradient(135deg, #2563eb 0%, #1e40af 100%)' },
-  info:       { accent: '#6366f1', accentLight: '#eef2ff', icon: 'ℹ',  label: 'Notification', gradient: 'linear-gradient(135deg, #6366f1 0%, #4338ca 100%)' },
+  redeemed: { accent: '#16a34a', accentLight: '#f0fdf4', icon: '🎉', label: 'Redeemed', gradient: 'linear-gradient(135deg, #16a34a 0%, #14532d 100%)' },
+  expense: { accent: '#7c3aed', accentLight: '#f5f3ff', icon: '📄', label: 'Expense', gradient: 'linear-gradient(135deg, #7c3aed 0%, #4c1d95 100%)' },
+  action: { accent: '#2563eb', accentLight: '#eff6ff', icon: '🔔', label: 'Action Required', gradient: 'linear-gradient(135deg, #2563eb 0%, #1e40af 100%)' },
+  info: { accent: '#6366f1', accentLight: '#eef2ff', icon: 'ℹ', label: 'Notification', gradient: 'linear-gradient(135deg, #6366f1 0%, #4338ca 100%)' },
 };
 
 /**
