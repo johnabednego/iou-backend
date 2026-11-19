@@ -5,7 +5,7 @@
  *   node test-email.js
  * 
  * It sends a test email to jajilima@mps-gh.com using the internal relay.
- * No database interaction — purely SMTP.
+ * No database interaction - purely SMTP.
  */
 
 const nodemailer = require('nodemailer');
@@ -74,7 +74,7 @@ const transporter = nodemailer.createTransport({
     console.log('  ✓ Email sent successfully!');
     console.log(`  Message ID: ${info.messageId}`);
     console.log(`  Response: ${info.response}`);
-    console.log('\n✅ SUCCESS — Check jajilima@mps-gh.com inbox.');
+    console.log('\n✅ SUCCESS - Check jajilima@mps-gh.com inbox.');
   } catch (err) {
     console.error('\n❌ FAILED:', err.message);
     console.error('\nFull error:', err);
