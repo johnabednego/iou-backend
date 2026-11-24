@@ -486,11 +486,11 @@ exports.assignApprovers = [
       const de = await DirectExpenseRequest.findByPk(id, { transaction: t });
       if (!de) { await t.rollback(); return res.status(404).json({ message: 'Direct Expense not found' }); }
 
-      // Block assignment only at terminal states
-      const deBlockedStatuses = ['DRAFT', 'REJECTED', 'COMPLETED'];
-      if (deBlockedStatuses.includes(de.status)) {
+      // Only allow assignment before disbursement (PENDING_HOD_ASSIGNMENT or PENDING)
+      const allowedStatuses = ['PENDING_HOD_ASSIGNMENT', 'PENDING'];
+      if (!allowedStatuses.includes(de.status)) {
         await t.rollback();
-        return res.status(400).json({ message: `Cannot assign approvers when Direct Expense is in ${de.status} status` });
+        return res.status(400).json({ message: `Cannot assign approvers when Direct Expense is in ${de.status} status. Approvers can only be assigned before disbursement.` });
       }
 
       if (!Array.isArray(approvers) || approvers.length === 0) {
@@ -1288,3 +1288,53 @@ exports.cashierReturnDE = [
   }
 ];
 
+
+/**
+ * PUT /api/direct-expenses/:id/ifs-voucher
+ * Update IFS Voucher Number on a Direct Expense (cashier/admin only, requires ifs_voucher_editing_enabled setting)
+ */
+exports.updateIfsVoucher = [
+  async (req, res) => {
+    const t = await sequelize.transaction();
+    try {
+      const actor = req.currentUser;
+      if (!actor) return res.status(401).json({ message: 'Not authenticated' });
+      if (!actor.is_cashier && !actor.is_admin) {
+        return res.status(403).json({ message: 'Cashier or admin privileges required' });
+      }
+
+      // Check if editing is enabled
+      const AppSetting = require('../models/AppSetting');
+      const setting = await AppSetting.findOne({ where: { key: 'ifs_voucher_editing_enabled' } });
+      if (!setting || setting.value !== 'true') {
+        return res.status(403).json({ message: 'IFS Voucher editing is currently disabled. Enable it in Settings first.' });
+      }
+
+      const { ifs_voucher_number } = req.body;
+      if (!ifs_voucher_number || !ifs_voucher_number.trim()) {
+        return res.status(400).json({ message: 'IFS Voucher Number is required' });
+      }
+
+      const de = await DirectExpenseRequest.findByPk(req.params.id, { transaction: t });
+      if (!de) { await t.rollback(); return res.status(404).json({ message: 'Direct Expense not found' }); }
+
+      const oldVoucher = de.ifs_voucher_number;
+      await de.update({ ifs_voucher_number: ifs_voucher_number.trim() }, { transaction: t });
+
+      await auditService.log({
+        action: 'IFS_VOUCHER_UPDATED',
+        entity_type: 'DIRECT_EXPENSE',
+        entity_id: de.id,
+        user_id: actor.id,
+        details: { old_voucher: oldVoucher, new_voucher: ifs_voucher_number.trim() }
+      }, t);
+
+      await t.commit();
+      return res.json({ message: 'IFS Voucher Number updated successfully.', ifs_voucher_number: ifs_voucher_number.trim() });
+    } catch (err) {
+      try { await t.rollback(); } catch (_) { }
+      console.error('updateIfsVoucher (DE) error', err);
+      return res.status(500).json({ message: 'Error updating IFS Voucher Number' });
+    }
+  }
+];

@@ -1,7 +1,7 @@
 // routes/settingsRoutes.js
 const express = require('express');
 const router = express.Router();
-const { getDateLimit, setDateLimit } = require('../controllers/settingsController');
+const { getDateLimit, setDateLimit, getIfsVoucherEditing, setIfsVoucherEditing } = require('../controllers/settingsController');
 const { isAuthenticated } = require('../middleware/auth');
 
 /**
@@ -65,5 +65,45 @@ router.get('/date-limit', isAuthenticated, getDateLimit);
  *         description: Admin required
  */
 router.put('/date-limit', isAuthenticated, setDateLimit);
+
+/**
+ * @swagger
+ * /settings/ifs-voucher-editing:
+ *   get:
+ *     summary: Check if IFS Voucher Number editing is enabled
+ *     tags: [Settings]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       '200':
+ *         description: IFS voucher editing status
+ */
+router.get('/ifs-voucher-editing', isAuthenticated, getIfsVoucherEditing);
+
+/**
+ * @swagger
+ * /settings/ifs-voucher-editing:
+ *   put:
+ *     summary: Enable or disable IFS Voucher Number editing (admin only)
+ *     tags: [Settings]
+ *     security:
+ *       - cookieAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [enabled]
+ *             properties:
+ *               enabled:
+ *                 type: boolean
+ *     responses:
+ *       '200':
+ *         description: Setting updated
+ *       '403':
+ *         description: Admin required
+ */
+router.put('/ifs-voucher-editing', isAuthenticated, setIfsVoucherEditing);
 
 module.exports = router;

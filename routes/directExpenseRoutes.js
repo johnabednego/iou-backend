@@ -14,7 +14,8 @@ const {
   completeDirectExpense,
   getDisbursements,
   cashierRejectDE,
-  cashierReturnDE
+  cashierReturnDE,
+  updateIfsVoucher
 } = require('../controllers/directExpenseController');
 const { isAuthenticated } = require('../middleware/auth');
 const { requireCashierOrAdmin } = require('../middleware/roles');
@@ -40,6 +41,9 @@ router.get('/:id/disbursements', isAuthenticated, getDisbursements);
 // Cashier reject/return
 router.post('/:id/cashier-reject', isAuthenticated, requireCashierOrAdmin, cashierRejectDE);
 router.post('/:id/cashier-return', isAuthenticated, requireCashierOrAdmin, cashierReturnDE);
+
+// IFS Voucher editing
+router.put('/:id/ifs-voucher', isAuthenticated, requireCashierOrAdmin, updateIfsVoucher);
 
 module.exports = router;
 

@@ -383,6 +383,12 @@ exports.assignExpenseApprovers = [
       const iou = await IOURequest.findByPk(id, { transaction: t });
       if (!iou) { await t.rollback(); return res.status(404).json({ message: 'IOU not found' }); }
 
+      // Only allow expense approver assignment at EXPENSE_PENDING_APPROVAL
+      if (iou.status !== 'EXPENSE_PENDING_APPROVAL') {
+        await t.rollback();
+        return res.status(400).json({ message: `Cannot assign expense approvers when IOU is in ${iou.status} status. Expense approvers can only be assigned at the Expense Pending Approval stage.` });
+      }
+
       if (!Array.isArray(approvers) || approvers.length === 0) {
         await t.rollback();
         return res.status(400).json({ message: 'At least two approvers are required for expense approval' });

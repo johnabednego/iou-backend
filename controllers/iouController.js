@@ -566,11 +566,11 @@ exports.assignApprovers = [
       const iou = await IOURequest.findByPk(id, { transaction: t });
       if (!iou) { await t.rollback(); return res.status(404).json({ message: 'IOU not found' }); }
 
-      // Block assignment only at terminal states
-      const blockedStatuses = ['DRAFT', 'REJECTED', 'REDEEMED'];
-      if (blockedStatuses.includes(iou.status)) {
+      // Only allow assignment before disbursement (PENDING_HOD_ASSIGNMENT or PENDING)
+      const allowedStatuses = ['PENDING_HOD_ASSIGNMENT', 'PENDING'];
+      if (!allowedStatuses.includes(iou.status)) {
         await t.rollback();
-        return res.status(400).json({ message: `Cannot assign approvers when IOU is in ${iou.status} status` });
+        return res.status(400).json({ message: `Cannot assign approvers when IOU is in ${iou.status} status. Approvers can only be assigned before disbursement.` });
       }
 
       if (!Array.isArray(approvers) || approvers.length === 0) {
@@ -1069,3 +1069,59 @@ exports.cashierReturnIOU = [
   }
 ];
 
+
+/**
+ * PUT /api/ious/:id/ifs-voucher
+ * Update IFS Voucher Number on an IOU (cashier/admin only, requires ifs_voucher_editing_enabled setting)
+ */
+exports.updateIfsVoucher = [
+  async (req, res) => {
+    const t = await sequelize.transaction();
+    try {
+      const actor = req.currentUser;
+      if (!actor) return res.status(401).json({ message: 'Not authenticated' });
+      if (!actor.is_cashier && !actor.is_admin) {
+        return res.status(403).json({ message: 'Cashier or admin privileges required' });
+      }
+
+      // Check if editing is enabled
+      const AppSetting = require('../models/AppSetting');
+      const setting = await AppSetting.findOne({ where: { key: 'ifs_voucher_editing_enabled' } });
+      if (!setting || setting.value !== 'true') {
+        return res.status(403).json({ message: 'IFS Voucher editing is currently disabled. Enable it in Settings first.' });
+      }
+
+      const { ifs_voucher_number } = req.body;
+      if (!ifs_voucher_number || !ifs_voucher_number.trim()) {
+        return res.status(400).json({ message: 'IFS Voucher Number is required' });
+      }
+
+      const iou = await IOURequest.findByPk(req.params.id, { transaction: t });
+      if (!iou) { await t.rollback(); return res.status(404).json({ message: 'IOU not found' }); }
+
+      const oldVoucher = iou.ifs_voucher_number;
+      await iou.update({ ifs_voucher_number: ifs_voucher_number.trim() }, { transaction: t });
+
+      // Also update reconciliation record if exists
+      const recon = await ReconciliationRecord.findOne({ where: { iou_id: iou.id }, transaction: t });
+      if (recon) {
+        await recon.update({ ifs_voucher_number: ifs_voucher_number.trim() }, { transaction: t });
+      }
+
+      await auditService.log({
+        action: 'IFS_VOUCHER_UPDATED',
+        entity_type: 'IOU',
+        entity_id: iou.id,
+        user_id: actor.id,
+        details: { old_voucher: oldVoucher, new_voucher: ifs_voucher_number.trim() }
+      }, t);
+
+      await t.commit();
+      return res.json({ message: 'IFS Voucher Number updated successfully.', ifs_voucher_number: ifs_voucher_number.trim() });
+    } catch (err) {
+      try { await t.rollback(); } catch (_) { }
+      console.error('updateIfsVoucher error', err);
+      return res.status(500).json({ message: 'Error updating IFS Voucher Number' });
+    }
+  }
+];

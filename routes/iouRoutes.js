@@ -10,7 +10,8 @@ const {
   assignApprovers,
   confirmApproval,
   cashierRejectIOU,
-  cashierReturnIOU
+  cashierReturnIOU,
+  updateIfsVoucher
 } = require('../controllers/iouController');
 const { isAuthenticated } = require('../middleware/auth');
 const { requireCashierOrAdmin } = require('../middleware/roles');
@@ -482,5 +483,8 @@ router.post('/:id/cashier-reject', isAuthenticated, requireCashierOrAdmin, cashi
  *         description: Forbidden
  */
 router.post('/:id/cashier-return', isAuthenticated, requireCashierOrAdmin, cashierReturnIOU);
+
+// IFS Voucher editing
+router.put('/:id/ifs-voucher', isAuthenticated, requireCashierOrAdmin, updateIfsVoucher);
 
 module.exports = router;
