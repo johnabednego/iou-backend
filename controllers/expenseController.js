@@ -11,6 +11,7 @@ const notificationService = require('../services/notificationService');
 const emailService = require('../services/emailService');
 const FundBalance = require('../models/FundBalance');
 const FundTransaction = require('../models/FundTransaction');
+const { roundCurrencyAmount, formatCurrencyText } = require('../services/currencyService');
 const { Op } = require('sequelize');
 
 /**
@@ -46,6 +47,13 @@ exports.submitExpense = [
       const { actual_amount, notes, attachments } = req.body;
       if (!actual_amount) { await t.rollback(); return res.status(400).json({ message: 'actual_amount is required' }); }
 
+      const iouCurrency = (iou.currency || 'GHS').toUpperCase();
+      const roundedActual = roundCurrencyAmount(actual_amount, iouCurrency);
+      if (isNaN(Number(actual_amount)) || roundedActual <= 0) {
+        await t.rollback();
+        return res.status(400).json({ message: 'actual_amount must be greater than 0' });
+      }
+
       // Req 9: Attachments are required
       if (!Array.isArray(attachments) || attachments.length === 0) {
         await t.rollback();
@@ -58,7 +66,7 @@ exports.submitExpense = [
       const expense = await ExpenseSubmission.create({
         iou_id: iou.id,
         submitter_id: actor.id,
-        actual_amount,
+        actual_amount: roundedActual,
         status: 'SUBMITTED',
         submitted_at: new Date(),
         deadline,
@@ -75,7 +83,7 @@ exports.submitExpense = [
         action: 'SUBMIT_EXPENSE',
         entity: 'IOU',
         entityId: iou.id,
-        details: { expense_id: expense.id, actual_amount, attachment_count: attachments.length }
+        details: { expense_id: expense.id, actual_amount: roundedActual, attachment_count: attachments.length }
       }, { transaction: t });
 
       // Notify cashiers to assign finance approvers
@@ -147,9 +155,17 @@ exports.updateExpense = [
       }
 
       const { actual_amount, notes, attachments } = req.body;
+      const iouCurrency = (iou.currency || 'GHS').toUpperCase();
 
       const payload = {};
-      if (actual_amount !== undefined) payload.actual_amount = actual_amount;
+      if (actual_amount !== undefined) {
+        const roundedActual = roundCurrencyAmount(actual_amount, iouCurrency);
+        if (isNaN(Number(actual_amount)) || roundedActual <= 0) {
+          await t.rollback();
+          return res.status(400).json({ message: 'actual_amount must be greater than 0' });
+        }
+        payload.actual_amount = roundedActual;
+      }
       if (notes !== undefined) payload.notes = notes;
       if (attachments !== undefined) {
         // Req 9: Attachments are still required on re-submit
@@ -624,32 +640,51 @@ exports.decideExpenseApproval = [
           }, { transaction: t });
           emailsToSend.push({ note, target_user_id: nextApproval.approver_id });
         } else {
-          // All expense approvals done - mark as EXPENSE_APPROVED
-          if (expense) await expense.update({ status: 'APPROVED' }, { transaction: t });
-          await iou.update({ status: 'EXPENSE_SUBMITTED' }, { transaction: t });
+          const totalExpenseApprovals = await Approval.count({
+            where: { iou_id: iou.id, approval_type: 'expense' },
+            transaction: t
+          });
+          if (totalExpenseApprovals < 2) {
+            const cashiers = await User.findAll({ where: { role: 'cashier', is_active: true }, transaction: t });
+            for (const c of cashiers) {
+              const noteWarn = await notificationService.createNotification({
+                target_user_id: c.id,
+                title: `Additional expense approver required: ${iou.request_number}`,
+                body: `Expense for IOU ${iou.request_number} was approved by ${actor.display_name || actor.username}, but at least 2 expense approvers are required. Please assign another approver.`,
+                link: `/ious/${iou.id}`,
+                entity: 'IOU',
+                entity_id: iou.id
+              }, { transaction: t });
+              emailsToSend.push({ note: noteWarn, target_user_id: c.id });
+            }
+          } else {
+            // All expense approvals done - mark as EXPENSE_APPROVED
+            if (expense) await expense.update({ status: 'APPROVED' }, { transaction: t });
+            await iou.update({ status: 'EXPENSE_SUBMITTED' }, { transaction: t });
 
-          // Notify requester and cashiers
-          const note1 = await notificationService.createNotification({
-            target_user_id: iou.requester_id,
-            title: `Expense approved: ${iou.request_number}`,
-            body: `Your expense for IOU ${iou.request_number} has been approved by finance. Cashier will reconcile.`,
-            link: `/ious/${iou.id}`,
-            entity: 'IOU',
-            entity_id: iou.id
-          }, { transaction: t });
-          emailsToSend.push({ note: note1, target_user_id: iou.requester_id });
-
-          const cashiers = await User.findAll({ where: { role: 'cashier', is_active: true }, transaction: t });
-          for (const c of cashiers) {
-            const note2 = await notificationService.createNotification({
-              target_user_id: c.id,
+            // Notify requester and cashiers
+            const note1 = await notificationService.createNotification({
+              target_user_id: iou.requester_id,
               title: `Expense approved: ${iou.request_number}`,
-              body: `Expense for IOU ${iou.request_number} has been approved by finance. Please reconcile.`,
+              body: `Your expense for IOU ${iou.request_number} has been approved by finance. Cashier will reconcile.`,
               link: `/ious/${iou.id}`,
               entity: 'IOU',
               entity_id: iou.id
             }, { transaction: t });
-            emailsToSend.push({ note: note2, target_user_id: c.id });
+            emailsToSend.push({ note: note1, target_user_id: iou.requester_id });
+
+            const cashiers = await User.findAll({ where: { role: 'cashier', is_active: true }, transaction: t });
+            for (const c of cashiers) {
+              const note2 = await notificationService.createNotification({
+                target_user_id: c.id,
+                title: `Expense approved: ${iou.request_number}`,
+                body: `Expense for IOU ${iou.request_number} has been approved by finance. Please reconcile.`,
+                link: `/ious/${iou.id}`,
+                entity: 'IOU',
+                entity_id: iou.id
+              }, { transaction: t });
+              emailsToSend.push({ note: note2, target_user_id: c.id });
+            }
           }
         }
       }
@@ -709,9 +744,10 @@ exports.reconcile = [
       const expense = await ExpenseSubmission.findOne({ where: { iou_id: iou.id }, transaction: t });
       if (!expense) { await t.rollback(); return res.status(400).json({ message: 'No expense submission found for this IOU.' }); }
 
-      const estimated = parseFloat(iou.estimated_amount) || 0;
-      const actual = parseFloat(expense.actual_amount) || 0;
-      const diff = actual - estimated;
+      const iouCurrency = (iou.currency || 'GHS').toUpperCase();
+      const estimated = roundCurrencyAmount(parseFloat(iou.estimated_amount) || 0, iouCurrency);
+      const actual = roundCurrencyAmount(parseFloat(expense.actual_amount) || 0, iouCurrency);
+      const diff = roundCurrencyAmount(actual - estimated, iouCurrency);
 
       let actionRequired = 'NONE';
       if (diff > 0) actionRequired = 'ADDITIONAL_APPROVAL';
@@ -736,7 +772,6 @@ exports.reconcile = [
       }, { transaction: t });
 
       // ─── Fund Balance Adjustment on Reconciliation ───
-      const iouCurrency = (iou.currency || 'GHS').toUpperCase();
       if (diff !== 0) {
         const fundBalance = await FundBalance.findOne({ where: { currency: iouCurrency }, transaction: t });
         const currentAvailable = fundBalance ? Number(fundBalance.available_amount) : 0;
@@ -749,18 +784,18 @@ exports.reconcile = [
           if (currentAvailable < diff) {
             await t.rollback();
             return res.status(400).json({
-              message: `Insufficient ${iouCurrency} funds to reconcile overspent IOU (${diff.toFixed(2)} ${iouCurrency} required, but only ${currentAvailable.toFixed(2)} available). Please update the fund balance before completing reconciliation.`
+              message: `Insufficient ${iouCurrency} funds to reconcile overspent IOU (${formatCurrencyText(diff, iouCurrency)} required, but only ${formatCurrencyText(currentAvailable, iouCurrency)} available). Please update the fund balance before completing reconciliation.`
             });
           }
-          newBalance = currentAvailable - diff;
+          newBalance = roundCurrencyAmount(currentAvailable - diff, iouCurrency);
           txType = 'RECONCILIATION_DEBIT';
-          txNotes = `Overspent reconciliation for IOU ${iou.request_number}: additional ${diff.toFixed(2)} ${iouCurrency} deducted`;
+          txNotes = `Overspent reconciliation for IOU ${iou.request_number}: additional ${formatCurrencyText(diff, iouCurrency)} deducted`;
         } else {
           // Underspent: actual < estimated - credit the underspent difference back
-          const creditAmount = Math.abs(diff);
-          newBalance = currentAvailable + creditAmount;
+          const creditAmount = roundCurrencyAmount(Math.abs(diff), iouCurrency);
+          newBalance = roundCurrencyAmount(currentAvailable + creditAmount, iouCurrency);
           txType = 'RECONCILIATION_CREDIT';
-          txNotes = `Underspent reconciliation for IOU ${iou.request_number}: ${creditAmount.toFixed(2)} ${iouCurrency} credited back`;
+          txNotes = `Underspent reconciliation for IOU ${iou.request_number}: ${formatCurrencyText(creditAmount, iouCurrency)} credited back`;
         }
 
         let [fundBalRecord] = await FundBalance.findOrCreate({
@@ -776,7 +811,7 @@ exports.reconcile = [
         await FundTransaction.create({
           currency: iouCurrency,
           type: txType,
-          amount: Math.abs(diff),
+          amount: roundCurrencyAmount(Math.abs(diff), iouCurrency),
           balance_after: newBalance,
           reference_id: iou.id,
           performed_by: actor.id,
@@ -797,10 +832,12 @@ exports.reconcile = [
       }, { transaction: t });
 
       // Notify requester
+      const diffSign = diff > 0 ? '+' : diff < 0 ? '-' : '';
+      const diffText = `${diffSign}${formatCurrencyText(Math.abs(diff), iouCurrency)}`;
       const note = await notificationService.createNotification({
         target_user_id: iou.requester_id,
         title: `IOU Reconciled: ${iou.request_number}`,
-        body: `Your IOU ${iou.request_number} has been reconciled. Difference: ${diff >= 0 ? '+' : ''}${diff.toFixed(2)}. ${actionRequired === 'REFUND' ? 'You need to return excess funds.' : actionRequired === 'ADDITIONAL_APPROVAL' ? 'Additional amount needs approval.' : 'No further action needed.'} Please confirm redemption.`,
+        body: `Your IOU ${iou.request_number} has been reconciled. Difference: ${diffText}. ${actionRequired === 'REFUND' ? 'You need to return excess funds.' : actionRequired === 'ADDITIONAL_APPROVAL' ? 'Additional amount needs approval.' : 'No further action needed.'} Please confirm redemption.`,
         link: `/ious/${iou.id}`,
         entity: 'IOU',
         entity_id: iou.id

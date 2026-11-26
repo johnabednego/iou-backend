@@ -8,6 +8,7 @@ const notificationService = require('../services/notificationService');
 const emailService = require('../services/emailService');
 const FundBalance = require('../models/FundBalance');
 const FundTransaction = require('../models/FundTransaction');
+const { roundCurrencyAmount } = require('../services/currencyService');
 
 /**
  * POST /api/ious/:id/disburse
@@ -33,10 +34,17 @@ exports.disburse = [
       const { amount, payment_method, payment_reference, notes, ifs_voucher_number } = req.body;
       if (!amount) { await t.rollback(); return res.status(400).json({ message: 'amount is required' }); }
 
+      const iouCurrency = (iou.currency || 'GHS').toUpperCase();
+      const numAmount = roundCurrencyAmount(amount, iouCurrency);
+      if (isNaN(Number(amount)) || numAmount <= 0) {
+        await t.rollback();
+        return res.status(400).json({ message: 'Disbursement amount must be greater than 0' });
+      }
+
       const disbursement = await Disbursement.create({
         iou_id: iou.id,
         cashier_id: actor.id,
-        amount,
+        amount: numAmount,
         payment_method: payment_method || null,
         payment_reference: payment_reference || null,
         disbursed_at: new Date(),
@@ -44,8 +52,6 @@ exports.disburse = [
       }, { transaction: t });
 
       // ─── Fund Balance Deduction ───
-      const iouCurrency = (iou.currency || 'GHS').toUpperCase();
-      const numAmount = Number(amount);
       const fundBalance = await FundBalance.findOne({ where: { currency: iouCurrency }, transaction: t });
       const currentAvailable = fundBalance ? Number(fundBalance.available_amount) : 0;
 
@@ -56,7 +62,7 @@ exports.disburse = [
         });
       }
 
-      const newBalance = currentAvailable - numAmount;
+      const newBalance = roundCurrencyAmount(currentAvailable - numAmount, iouCurrency);
       if (fundBalance) {
         await fundBalance.update({
           available_amount: newBalance,
@@ -88,7 +94,7 @@ exports.disburse = [
         entityId: iou.id,
         details: {
           disbursement_id: disbursement.id,
-          amount,
+          amount: numAmount,
           payment_method,
           ...(ifs_voucher_number && ifs_voucher_number.trim() ? { ifs_voucher_number: ifs_voucher_number.trim() } : {})
         }

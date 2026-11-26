@@ -11,7 +11,8 @@ const {
   confirmApproval,
   cashierRejectIOU,
   cashierReturnIOU,
-  updateIfsVoucher
+  updateIfsVoucher,
+  cancelIfsVoucher
 } = require('../controllers/iouController');
 const { isAuthenticated } = require('../middleware/auth');
 const { requireCashierOrAdmin } = require('../middleware/roles');
@@ -484,7 +485,8 @@ router.post('/:id/cashier-reject', isAuthenticated, requireCashierOrAdmin, cashi
  */
 router.post('/:id/cashier-return', isAuthenticated, requireCashierOrAdmin, cashierReturnIOU);
 
-// IFS Voucher editing
+// IFS Voucher editing & cancellation
 router.put('/:id/ifs-voucher', isAuthenticated, requireCashierOrAdmin, updateIfsVoucher);
+router.post('/:id/ifs-voucher/cancel', isAuthenticated, requireCashierOrAdmin, cancelIfsVoucher);
 
 module.exports = router;

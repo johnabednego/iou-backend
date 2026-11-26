@@ -91,8 +91,9 @@ exports.getDashboardAnalytics = [
         const rejected = statusCounts
           .filter(r => ['REJECTED', 'CANCELLED'].includes(r.status))
           .reduce((sum, r) => sum + parseInt(r.count), 0);
+        const total = statusCounts.reduce((sum, r) => sum + (parseInt(r.count, 10) || 0), 0);
 
-        iousByMonth.push({ month: monthLabel, pending, approved, rejected, total: pending + approved + rejected });
+        iousByMonth.push({ month: monthLabel, pending, approved, rejected, total, count: total });
       }
 
       // ─── 2. IOUs by Week (last 8 weeks) ───
@@ -349,10 +350,11 @@ exports.getDashboardAnalytics = [
             .filter(r => ['APPROVED_FOR_DISBURSEMENT', 'DISBURSED', 'DISBURSEMENT_CONFIRMED', 'COMPLETED'].includes(r.status))
             .reduce((sum, r) => sum + parseInt(r.count), 0);
           const rejected = deCounts
-            .filter(r => ['REJECTED'].includes(r.status))
+            .filter(r => ['REJECTED', 'CANCELLED'].includes(r.status))
             .reduce((sum, r) => sum + parseInt(r.count), 0);
+          const total = deCounts.reduce((sum, r) => sum + (parseInt(r.count, 10) || 0), 0);
 
-          deByMonth.push({ month: mLabel, pending, approved, rejected, total: pending + approved + rejected });
+          deByMonth.push({ month: mLabel, pending, approved, rejected, total, count: total });
         }
 
         // DE: Department Breakdown

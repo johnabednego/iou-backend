@@ -385,26 +385,37 @@ exports.decideApproval = [
         } else {
           // No more pending approvals
           if (approval.approval_type === 'expense') {
-            const expense = await ExpenseSubmission.findOne({ where: { iou_id: iou.id }, transaction: t });
-            if (expense) await expense.update({ status: 'APPROVED' }, { transaction: t });
-            await iou.update({ status: 'EXPENSE_SUBMITTED' }, { transaction: t });
+            const totalExpenseApprovals = await Approval.count({
+              where: { iou_id: iou.id, approval_type: 'expense' },
+              transaction: t
+            });
+            if (totalExpenseApprovals < 2) {
+              await notifyCashiers(
+                `Additional expense approver required: ${requestNumber}`,
+                `Expense for IOU ${requestNumber} was approved by ${actor.display_name || actor.username}, but at least 2 expense approvers are required. Please assign another approver.`
+              );
+            } else {
+              const expense = await ExpenseSubmission.findOne({ where: { iou_id: iou.id }, transaction: t });
+              if (expense) await expense.update({ status: 'APPROVED' }, { transaction: t });
+              await iou.update({ status: 'EXPENSE_SUBMITTED' }, { transaction: t });
 
-            // Notify requester
-            const note1 = await notificationService.createNotification({
-              target_user_id: requesterId,
-              title: `Expense approved: ${requestNumber}`,
-              body: `Your expense for IOU ${requestNumber} has been approved by finance. Cashier will reconcile.`,
-              link: requestLink,
-              entity: requestEntity,
-              entity_id: requestEntityId
-            }, { transaction: t });
-            emailsToSend.push({ note: note1, target_user_id: requesterId });
+              // Notify requester
+              const note1 = await notificationService.createNotification({
+                target_user_id: requesterId,
+                title: `Expense approved: ${requestNumber}`,
+                body: `Your expense for IOU ${requestNumber} has been approved by finance. Cashier will reconcile.`,
+                link: requestLink,
+                entity: requestEntity,
+                entity_id: requestEntityId
+              }, { transaction: t });
+              emailsToSend.push({ note: note1, target_user_id: requesterId });
 
-            // Notify cashiers
-            await notifyCashiers(
-              `Expense approved: ${requestNumber}`,
-              `Expense for IOU ${requestNumber} has been approved by finance. Please reconcile.`
-            );
+              // Notify cashiers
+              await notifyCashiers(
+                `Expense approved: ${requestNumber}`,
+                `Expense for IOU ${requestNumber} has been approved by finance. Please reconcile.`
+              );
+            }
           } else if (approval.approval_type === 'direct_expense') {
             // No more pending approvals for Direct Expense - notify cashiers to Confirm Approval
             await notifyCashiers(

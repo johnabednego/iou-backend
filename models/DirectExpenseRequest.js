@@ -70,6 +70,26 @@ DirectExpenseRequest.init({
   ifs_voucher_number: {
     type: DataTypes.STRING(64),
     allowNull: true,
+  },
+  cancelled_ifs_vouchers: {
+    type: DataTypes.TEXT,
+    allowNull: true,
+    get() {
+      const val = this.getDataValue('cancelled_ifs_vouchers');
+      if (!val) return [];
+      if (Array.isArray(val)) return val;
+      try {
+        const parsed = JSON.parse(val);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (e) { return []; }
+    },
+    set(val) {
+      if (val === null || val === undefined) {
+        this.setDataValue('cancelled_ifs_vouchers', null);
+      } else {
+        this.setDataValue('cancelled_ifs_vouchers', typeof val === 'string' ? val : JSON.stringify(val));
+      }
+    }
   }
 }, {
   sequelize,

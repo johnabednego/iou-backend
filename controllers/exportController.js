@@ -2,6 +2,8 @@
 const { IOURequest, User, Approval, Disbursement, ExpenseSubmission, ReconciliationRecord } = require('../models');
 const { Op } = require('sequelize');
 const ExcelJS = require('exceljs');
+const { resolveIouStatusFilter } = require('../services/filterService');
+const { roundCurrencyAmount, getExcelCurrencyNumFmt } = require('../services/currencyService');
 
 /**
  * GET /api/ious/export
@@ -30,7 +32,8 @@ exports.exportRedeemed = [
 
       // Status filter
       if (req.query.status) {
-        where.status = req.query.status;
+        const resolvedStatus = resolveIouStatusFilter(req.query.status);
+        if (resolvedStatus) where.status = resolvedStatus;
       }
 
       // Department filter
@@ -85,6 +88,7 @@ exports.exportRedeemed = [
           { request_number: { [Op.like]: `%${search}%` } },
           { purpose: { [Op.like]: `%${search}%` } },
           { ifs_voucher_number: { [Op.like]: `%${search}%` } },
+          { cancelled_ifs_vouchers: { [Op.like]: `%${search}%` } },
           { '$requester.display_name$': { [Op.like]: `%${search}%` } }
         ];
         if (!isNaN(numSearch) && numSearch > 0) {
@@ -194,6 +198,7 @@ exports.exportRedeemed = [
             { request_number: { [Op.like]: `%${search}%` } },
             { purpose: { [Op.like]: `%${search}%` } },
             { ifs_voucher_number: { [Op.like]: `%${search}%` } },
+            { cancelled_ifs_vouchers: { [Op.like]: `%${search}%` } },
             { '$requester.display_name$': { [Op.like]: `%${search}%` } }
           ];
           if (!isNaN(numSearch) && numSearch > 0) {
@@ -261,6 +266,7 @@ exports.exportRedeemed = [
         // === IOU Request Details ===
         { header: 'Request #', key: 'request_number', width: 25 },
         { header: 'IFS Voucher #', key: 'ifs_voucher_number', width: 18 },
+        { header: 'Cancelled IFS Voucher(s)', key: 'cancelled_ifs_vouchers', width: 26 },
         { header: 'Purpose', key: 'purpose', width: 40 },
         { header: 'Requester', key: 'requester_name', width: 22 },
         { header: 'Requester Email', key: 'requester_email', width: 28 },
@@ -359,16 +365,19 @@ exports.exportRedeemed = [
           else spendingOutcome = 'Exact';
         }
 
-        sheet.addRow({
+        const iouCur = (iou.currency || 'GHS').toUpperCase();
+        const rowNumFmt = getExcelCurrencyNumFmt(iouCur);
+        const addedRow = sheet.addRow({
           // IOU details
           request_number: iou.request_number || '',
           ifs_voucher_number: iou.ifs_voucher_number || '',
+          cancelled_ifs_vouchers: Array.isArray(iou.cancelled_ifs_vouchers) ? iou.cancelled_ifs_vouchers.map(c => c.voucher_number).filter(Boolean).join(', ') : '',
           purpose: iou.purpose || '',
           requester_name: iou.requester?.display_name || iou.requester?.username || '',
           requester_email: iou.requester?.email || '',
           department: iou.department || iou.requester?.department || '',
-          estimated_amount: iou.estimated_amount ? Number(iou.estimated_amount) : 0,
-          currency: iou.currency || 'GHS',
+          estimated_amount: iou.estimated_amount !== undefined && iou.estimated_amount !== null ? roundCurrencyAmount(iou.estimated_amount, iouCur) : 0,
+          currency: iouCur,
           status: iou.status || '',
           submitted_at: fmtDate(iou.submitted_at),
           created_at: fmtDate(iou.created_at),
@@ -392,7 +401,7 @@ exports.exportRedeemed = [
           approver_3_date: fmtDate(ap3.decision_at),
 
           // Disbursement
-          disbursed_amount: disb.amount ? Number(disb.amount) : '',
+          disbursed_amount: disb.amount ? roundCurrencyAmount(disb.amount, iouCur) : '',
           payment_method: disb.payment_method || '',
           payment_reference: disb.payment_reference || '',
           disbursed_by: disb.cashier?.display_name || disb.cashier?.username || '',
@@ -402,16 +411,16 @@ exports.exportRedeemed = [
           receipt_confirmed_at: fmtDate(disb.confirmed_at),
 
           // Expense
-          actual_amount: expense.actual_amount ? Number(expense.actual_amount) : '',
+          actual_amount: expense.actual_amount ? roundCurrencyAmount(expense.actual_amount, iouCur) : '',
           expense_status: expense.status || '',
           expense_submitted_by: expense.submitter?.display_name || expense.submitter?.username || '',
           expense_submitted_at: fmtDate(expense.submitted_at),
           expense_notes: expense.notes || '',
 
           // Reconciliation
-          recon_estimated: recon.estimated_amount ? Number(recon.estimated_amount) : '',
-          recon_actual: recon.actual_amount ? Number(recon.actual_amount) : '',
-          recon_diff: recon.diff_amount ? Number(recon.diff_amount) : '',
+          recon_estimated: recon.estimated_amount ? roundCurrencyAmount(recon.estimated_amount, iouCur) : '',
+          recon_actual: recon.actual_amount ? roundCurrencyAmount(recon.actual_amount, iouCur) : '',
+          recon_diff: (recon.diff_amount !== undefined && recon.diff_amount !== null && recon.diff_amount !== '') ? roundCurrencyAmount(recon.diff_amount, iouCur) : '',
           spending_outcome: spendingOutcome,
           recon_action: recon.action_required || '',
           recon_ifs_voucher: recon.ifs_voucher_number || '',
@@ -422,16 +431,23 @@ exports.exportRedeemed = [
           // Timestamps
           updated_at: fmtDate(iou.updated_at),
         });
+
+        ['estimated_amount', 'disbursed_amount', 'actual_amount', 'recon_estimated', 'recon_actual', 'recon_diff'].forEach((colKey) => {
+          const cell = addedRow.getCell(colKey);
+          if (typeof cell.value === 'number') {
+            cell.numFmt = rowNumFmt;
+          }
+        });
       }
 
       // Section header coloring
       const sectionColors = {
-        iou: { start: 1, end: 11, color: 'FF1F88E5' },
-        approvals: { start: 12, end: 23, color: 'FF2E7D32' },
-        disbursement: { start: 24, end: 31, color: 'FFE65100' },
-        expense: { start: 32, end: 36, color: 'FF6A1B9A' },
-        reconciliation: { start: 37, end: 45, color: 'FF00695C' },
-        timestamps: { start: 46, end: 46, color: 'FF37474F' },
+        iou: { start: 1, end: 12, color: 'FF1F88E5' },
+        approvals: { start: 13, end: 24, color: 'FF2E7D32' },
+        disbursement: { start: 25, end: 32, color: 'FFE65100' },
+        expense: { start: 33, end: 37, color: 'FF6A1B9A' },
+        reconciliation: { start: 38, end: 46, color: 'FF00695C' },
+        timestamps: { start: 47, end: 47, color: 'FF37474F' },
       };
 
       for (const section of Object.values(sectionColors)) {
@@ -470,6 +486,7 @@ exports.exportRedeemed = [
         deSheet.columns = [
           { header: 'Request #', key: 'request_number', width: 25 },
           { header: 'IFS Voucher #', key: 'ifs_voucher_number', width: 18 },
+          { header: 'Cancelled IFS Voucher(s)', key: 'cancelled_ifs_vouchers', width: 26 },
           { header: 'Purpose', key: 'purpose', width: 40 },
           { header: 'Requester', key: 'requester_name', width: 22 },
           { header: 'Requester Email', key: 'requester_email', width: 28 },
@@ -526,15 +543,18 @@ exports.exportRedeemed = [
           const ap3 = approvals[2] || {};
           const disb = (de.disbursements || []).sort((a, b) => new Date(b.disbursed_at || 0) - new Date(a.disbursed_at || 0))[0] || {};
 
-          deSheet.addRow({
+          const deCur = (de.currency || 'GHS').toUpperCase();
+          const deNumFmt = getExcelCurrencyNumFmt(deCur);
+          const addedDeRow = deSheet.addRow({
             request_number: de.request_number,
             ifs_voucher_number: de.ifs_voucher_number || '',
+            cancelled_ifs_vouchers: Array.isArray(de.cancelled_ifs_vouchers) ? de.cancelled_ifs_vouchers.map(c => c.voucher_number).filter(Boolean).join(', ') : '',
             purpose: de.purpose || '',
             requester_name: de.requester ? (de.requester.display_name || de.requester.username) : '',
             requester_email: de.requester ? de.requester.email : '',
             department: de.department || '',
-            currency: de.currency || 'GHS',
-            amount: parseFloat(de.amount) || 0,
+            currency: deCur,
+            amount: roundCurrencyAmount(parseFloat(de.amount) || 0, deCur),
             status: de.status,
             submitted_at: fmtDate(de.created_at),
 
@@ -553,7 +573,7 @@ exports.exportRedeemed = [
             approver_3_comments: ap3.comments || '',
             approver_3_date: fmtDate(ap3.decided_at),
 
-            disbursed_amount: disb.amount ? parseFloat(disb.amount) : '',
+            disbursed_amount: disb.amount ? roundCurrencyAmount(parseFloat(disb.amount), deCur) : '',
             payment_method: disb.payment_method || '',
             payment_reference: disb.payment_reference || '',
             disbursed_by: disb.cashier ? (disb.cashier.display_name || disb.cashier.username) : '',
@@ -563,6 +583,12 @@ exports.exportRedeemed = [
             receipt_confirmed_at: fmtDate(disb.confirmed_at),
 
             updated_at: fmtDate(de.updated_at),
+          });
+          ['amount', 'disbursed_amount'].forEach((colKey) => {
+            const cell = addedDeRow.getCell(colKey);
+            if (typeof cell.value === 'number') {
+              cell.numFmt = deNumFmt;
+            }
           });
         }
 

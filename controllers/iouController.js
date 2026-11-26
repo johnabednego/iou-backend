@@ -11,6 +11,8 @@ const auditService = require('../services/auditService');
 const notificationService = require('../services/notificationService');
 const emailService = require('../services/emailService');
 const FundBalance = require('../models/FundBalance');
+const { resolveIouStatusFilter, parseDateBoundary } = require('../services/filterService');
+const { roundCurrencyAmount } = require('../services/currencyService');
 const { Op } = require('sequelize');
 
 
@@ -47,11 +49,19 @@ exports.createIOU = [
         });
       }
 
-      // Fund sufficiency check
+      // Fund sufficiency check & currency-specific rounding
       const iouCurrency = (currency || 'GHS').toUpperCase().trim();
+      const roundedEstimated = roundCurrencyAmount(numEstimated, iouCurrency);
+      if (roundedEstimated <= 0) {
+        await t.rollback();
+        return res.status(400).json({
+          message: 'Amount must be greater than 0 after rounding. Requests with an amount of 0 or less are not accepted.'
+        });
+      }
+
       const fundBalance = await FundBalance.findOne({ where: { currency: iouCurrency }, transaction: t });
       const available = fundBalance ? Number(fundBalance.available_amount) : 0;
-      if (available <= 0 || available < numEstimated) {
+      if (available <= 0 || available < roundedEstimated) {
         await t.rollback();
         return res.status(400).json({
           message: 'Insufficient funds available for this currency. Please contact the Finance Department.'
@@ -63,7 +73,7 @@ exports.createIOU = [
         requester_id: actor.id,
         department: actor.department || null,
         purpose: purpose || null,
-        estimated_amount: numEstimated,
+        estimated_amount: roundedEstimated,
         currency: iouCurrency,
         status: 'DRAFT'
       }, { transaction: t });
@@ -154,25 +164,50 @@ exports.listIOUs = [
       const offset = parseInt(req.query.offset || '0', 10);
 
       const where = {};
-      // status filter
-      if (req.query.status) where.status = req.query.status;
+      const andConditions = [];
+      // status filter (supports single status, group presets, or comma-separated list)
+      if (req.query.status) {
+        const resolvedStatus = resolveIouStatusFilter(req.query.status);
+        if (resolvedStatus) where.status = resolvedStatus;
+      }
       if (req.query.department) where.department = req.query.department;
       // currency filter
       if (req.query.currency) where.currency = req.query.currency.toUpperCase().trim();
 
+      // voucher status filter
+      if (req.query.voucher_status === 'has_cancelled') {
+        andConditions.push({ cancelled_ifs_vouchers: { [Op.like]: '%"voucher_number"%' } });
+      } else if (req.query.voucher_status === 'active_only') {
+        andConditions.push({ ifs_voucher_number: { [Op.ne]: null } });
+        andConditions.push({
+          [Op.or]: [
+            { cancelled_ifs_vouchers: null },
+            { cancelled_ifs_vouchers: '[]' }
+          ]
+        });
+      }
+
       // date range
       if (req.query.start_date || req.query.end_date) {
-        where.created_at = {};
-        if (req.query.start_date) where.created_at[Op.gte] = new Date(req.query.start_date);
-        if (req.query.end_date) {
-          // include whole end day
-          const end = new Date(req.query.end_date);
-          end.setHours(23, 59, 59, 999);
-          where.created_at[Op.lte] = end;
+        const startBound = parseDateBoundary(req.query.start_date, false);
+        const endBound = parseDateBoundary(req.query.end_date, true);
+        if (req.query.date_field === 'activity') {
+          const activityCol = sequelize.fn(
+            'COALESCE',
+            sequelize.col('IOURequest.updated_at'),
+            sequelize.col('IOURequest.created_at'),
+            sequelize.col('IOURequest.submitted_at')
+          );
+          if (startBound) andConditions.push(sequelize.where(activityCol, { [Op.gte]: startBound }));
+          if (endBound) andConditions.push(sequelize.where(activityCol, { [Op.lte]: endBound }));
+        } else {
+          where.created_at = {};
+          if (startBound) where.created_at[Op.gte] = startBound;
+          if (endBound) where.created_at[Op.lte] = endBound;
         }
       }
 
-      // search: request_number, purpose, ifs_voucher_number, requester name, or estimated_amount (numeric)
+      // search: request_number, purpose, ifs_voucher_number (active or cancelled), requester name, or estimated_amount (numeric)
       const search = (req.query.search || '').trim();
       if (search) {
         const numSearch = parseFloat(search);
@@ -180,6 +215,7 @@ exports.listIOUs = [
           { request_number: { [Op.like]: `%${search}%` } },
           { purpose: { [Op.like]: `%${search}%` } },
           { ifs_voucher_number: { [Op.like]: `%${search}%` } },
+          { cancelled_ifs_vouchers: { [Op.like]: `%${search}%` } },
           { '$requester.display_name$': { [Op.like]: `%${search}%` } }
         ];
         // Also match exact numeric amounts if the search looks like a number
@@ -241,13 +277,16 @@ exports.listIOUs = [
           const searchCond = where[Op.or];
           delete where[Op.or];
           where[Op.and] = [
+            ...andConditions,
             { [Op.or]: searchCond },
             { [Op.or]: userVisibilityCond }
           ];
         } else {
+          if (andConditions.length > 0) where[Op.and] = andConditions;
           where[Op.or] = userVisibilityCond;
         }
       } else {
+        if (andConditions.length > 0) where[Op.and] = andConditions;
         const requesterIdQ = req.query.requester_id || null;
         const allFlag = req.query.all === 'true' || req.query.all === true || false;
         if (requesterIdQ && !allFlag) where.requester_id = requesterIdQ;
@@ -393,13 +432,25 @@ exports.updateIOU = [
       const payload = {};
       allowed.forEach(k => { if (req.body[k] !== undefined) payload[k] = req.body[k]; });
 
+      const targetCurrency = (payload.currency || iou.currency || 'GHS').toUpperCase().trim();
+      if (payload.currency !== undefined) {
+        payload.currency = targetCurrency;
+      }
+
       if (payload.estimated_amount !== undefined) {
         const numEstimated = Number(payload.estimated_amount);
         if (isNaN(numEstimated) || numEstimated <= 0) {
           await t.rollback();
           return res.status(400).json({ message: 'Amount must be greater than 0.00' });
         }
-        payload.estimated_amount = numEstimated;
+        const roundedEstimated = roundCurrencyAmount(numEstimated, targetCurrency);
+        if (roundedEstimated <= 0) {
+          await t.rollback();
+          return res.status(400).json({ message: 'Amount must be greater than 0 after rounding' });
+        }
+        payload.estimated_amount = roundedEstimated;
+      } else if (payload.currency !== undefined) {
+        payload.estimated_amount = roundCurrencyAmount(iou.estimated_amount, targetCurrency);
       }
 
       await iou.update(payload, { transaction: t });
@@ -573,9 +624,12 @@ exports.assignApprovers = [
         return res.status(400).json({ message: `Cannot assign approvers when IOU is in ${iou.status} status. Approvers can only be assigned before disbursement.` });
       }
 
-      if (!Array.isArray(approvers) || approvers.length === 0) {
+      if (!Array.isArray(approvers) || approvers.length < 2) {
         await t.rollback();
-        return res.status(400).json({ message: 'At least one approver is required' });
+        return res.status(400).json({
+          message: 'At least 2 approvers are required (1 Head of Department + at least 1 additional approver).',
+          code: 'MIN_APPROVERS_NOT_MET'
+        });
       }
 
       // ── Validation ──
@@ -791,6 +845,11 @@ exports.confirmApproval = [
       if (allApprovals.length === 0) {
         await t.rollback();
         return res.status(400).json({ message: 'No approvals found. Please assign approvers first.' });
+      }
+
+      if (allApprovals.length < 2) {
+        await t.rollback();
+        return res.status(400).json({ message: 'At least 2 approvers must approve before confirming approval.' });
       }
 
       const pendingApprovals = allApprovals.filter(a => a.decision === 'PENDING');
@@ -1079,20 +1138,23 @@ exports.updateIfsVoucher = [
     const t = await sequelize.transaction();
     try {
       const actor = req.currentUser;
-      if (!actor) return res.status(401).json({ message: 'Not authenticated' });
-      if (!actor.is_cashier && !actor.is_admin) {
+      if (!actor) { await t.rollback(); return res.status(401).json({ message: 'Not authenticated' }); }
+      if (!actor.is_admin && actor.role !== 'cashier') {
+        await t.rollback();
         return res.status(403).json({ message: 'Cashier or admin privileges required' });
       }
 
       // Check if editing is enabled
       const AppSetting = require('../models/AppSetting');
-      const setting = await AppSetting.findOne({ where: { key: 'ifs_voucher_editing_enabled' } });
+      const setting = await AppSetting.findOne({ where: { key: 'ifs_voucher_editing_enabled' }, transaction: t });
       if (!setting || setting.value !== 'true') {
+        await t.rollback();
         return res.status(403).json({ message: 'IFS Voucher editing is currently disabled. Enable it in Settings first.' });
       }
 
       const { ifs_voucher_number } = req.body;
       if (!ifs_voucher_number || !ifs_voucher_number.trim()) {
+        await t.rollback();
         return res.status(400).json({ message: 'IFS Voucher Number is required' });
       }
 
@@ -1109,12 +1171,13 @@ exports.updateIfsVoucher = [
       }
 
       await auditService.log({
+        actorId: actor.id,
+        actorName: actor.display_name || actor.username,
         action: 'IFS_VOUCHER_UPDATED',
-        entity_type: 'IOU',
-        entity_id: iou.id,
-        user_id: actor.id,
-        details: { old_voucher: oldVoucher, new_voucher: ifs_voucher_number.trim() }
-      }, t);
+        entity: 'IOU',
+        entityId: iou.id,
+        details: { request_number: iou.request_number, old_voucher: oldVoucher, new_voucher: ifs_voucher_number.trim() }
+      }, { transaction: t });
 
       await t.commit();
       return res.json({ message: 'IFS Voucher Number updated successfully.', ifs_voucher_number: ifs_voucher_number.trim() });
@@ -1122,6 +1185,98 @@ exports.updateIfsVoucher = [
       try { await t.rollback(); } catch (_) { }
       console.error('updateIfsVoucher error', err);
       return res.status(500).json({ message: 'Error updating IFS Voucher Number' });
+    }
+  }
+];
+
+/**
+ * POST /api/ious/:id/ifs-voucher/cancel
+ * Cancel an existing IFS Voucher Number on an IOU and replace it with a mandatory new one.
+ * Keeps the cancelled voucher linked to the request for display and search.
+ */
+exports.cancelIfsVoucher = [
+  async (req, res) => {
+    const t = await sequelize.transaction();
+    try {
+      const actor = req.currentUser;
+      if (!actor) { await t.rollback(); return res.status(401).json({ message: 'Not authenticated' }); }
+      if (!actor.is_admin && actor.role !== 'cashier') {
+        await t.rollback();
+        return res.status(403).json({ message: 'Cashier or admin privileges required' });
+      }
+
+      const { new_ifs_voucher_number, reason } = req.body;
+      const newVoucher = (new_ifs_voucher_number || '').trim();
+      if (!newVoucher) {
+        await t.rollback();
+        return res.status(400).json({ message: 'A new IFS Voucher Number is required when cancelling an existing one.' });
+      }
+
+      const iou = await IOURequest.findByPk(req.params.id, { transaction: t });
+      if (!iou) { await t.rollback(); return res.status(404).json({ message: 'IOU not found' }); }
+
+      const currentVoucher = (iou.ifs_voucher_number || '').trim();
+      if (!currentVoucher) {
+        await t.rollback();
+        return res.status(400).json({ message: 'No active IFS Voucher Number exists on this IOU to cancel.' });
+      }
+
+      if (newVoucher.toLowerCase() === currentVoucher.toLowerCase()) {
+        await t.rollback();
+        return res.status(400).json({ message: 'The new IFS Voucher Number must be different from the one being cancelled.' });
+      }
+
+      const existingCancelled = Array.isArray(iou.cancelled_ifs_vouchers) ? iou.cancelled_ifs_vouchers : [];
+      if (existingCancelled.some(c => (c.voucher_number || '').trim().toLowerCase() === newVoucher.toLowerCase())) {
+        await t.rollback();
+        return res.status(400).json({ message: 'That IFS Voucher Number has already been cancelled on this request.' });
+      }
+
+      const updatedCancelled = [
+        ...existingCancelled,
+        {
+          voucher_number: currentVoucher,
+          cancelled_at: new Date().toISOString(),
+          cancelled_by: actor.id,
+          reason: reason && reason.trim() ? reason.trim() : null,
+          replaced_by: newVoucher
+        }
+      ];
+
+      await iou.update({
+        ifs_voucher_number: newVoucher,
+        cancelled_ifs_vouchers: updatedCancelled
+      }, { transaction: t });
+
+      const recon = await ReconciliationRecord.findOne({ where: { iou_id: iou.id }, transaction: t });
+      if (recon) {
+        await recon.update({ ifs_voucher_number: newVoucher }, { transaction: t });
+      }
+
+      await auditService.log({
+        actorId: actor.id,
+        actorName: actor.display_name || actor.username,
+        action: 'IFS_VOUCHER_CANCELLED',
+        entity: 'IOU',
+        entityId: iou.id,
+        details: {
+          request_number: iou.request_number,
+          cancelled_voucher: currentVoucher,
+          new_voucher: newVoucher,
+          reason: reason && reason.trim() ? reason.trim() : null
+        }
+      }, { transaction: t });
+
+      await t.commit();
+      return res.json({
+        message: `IFS Voucher "${currentVoucher}" cancelled and replaced with "${newVoucher}".`,
+        ifs_voucher_number: newVoucher,
+        cancelled_ifs_vouchers: updatedCancelled
+      });
+    } catch (err) {
+      try { await t.rollback(); } catch (_) { }
+      console.error('cancelIfsVoucher error', err);
+      return res.status(500).json({ message: 'Error cancelling IFS Voucher Number' });
     }
   }
 ];

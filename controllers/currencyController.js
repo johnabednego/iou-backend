@@ -5,6 +5,7 @@ const FundBalance = require('../models/FundBalance');
 const sequelize = require('../config/database');
 const { Op } = require('sequelize');
 const auditService = require('../services/auditService');
+const { formatCurrencyText } = require('../services/currencyService');
 
 /**
  * GET /api/currencies
@@ -206,7 +207,7 @@ exports.deleteCurrency = [
       const currentAmount = fundBalance ? Number(fundBalance.available_amount) : 0;
       if (currentAmount !== 0) {
         return res.status(400).json({
-          message: `Cannot deactivate ${currency.code}. The fund balance is ${currentAmount.toFixed(2)}. Please decrease the balance to 0.00 before deactivating this currency.`
+          message: `Cannot deactivate ${currency.code}. The fund balance is ${formatCurrencyText(currentAmount, currency.code)}. Please decrease the balance to ${formatCurrencyText(0, currency.code)} before deactivating this currency.`
         });
       }
 

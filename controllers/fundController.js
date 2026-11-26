@@ -5,6 +5,7 @@ const Currency = require('../models/Currency');
 const User = require('../models/User');
 const sequelize = require('../config/database');
 const auditService = require('../services/auditService');
+const { roundCurrencyAmount, formatCurrencyText } = require('../services/currencyService');
 
 /**
  * GET /api/funds
@@ -71,7 +72,7 @@ exports.updateFundBalance = [
         return res.status(400).json({ message: 'amount must be a non-negative number' });
       }
 
-      const numAmount = Number(amount);
+      const numAmount = roundCurrencyAmount(Number(amount), upperCurrency);
 
       // Find or create fund balance
       let [balance, created] = await FundBalance.findOrCreate({
@@ -94,17 +95,17 @@ exports.updateFundBalance = [
           txType = 'MANUAL_SET';
           break;
         case 'increase':
-          newAmount = previousAmount + numAmount;
+          newAmount = roundCurrencyAmount(previousAmount + numAmount, upperCurrency);
           txType = 'MANUAL_CREDIT';
           break;
         case 'decrease':
           if (previousAmount < numAmount) {
             await t.rollback();
             return res.status(400).json({
-              message: `Cannot decrease by ${numAmount}. Current balance is ${previousAmount} ${upperCurrency}. Resulting balance cannot be negative.`
+              message: `Cannot decrease by ${formatCurrencyText(numAmount, upperCurrency)}. Current balance is ${formatCurrencyText(previousAmount, upperCurrency)}. Resulting balance cannot be negative.`
             });
           }
-          newAmount = previousAmount - numAmount;
+          newAmount = roundCurrencyAmount(previousAmount - numAmount, upperCurrency);
           txType = 'MANUAL_DEBIT';
           break;
       }
@@ -112,7 +113,7 @@ exports.updateFundBalance = [
       if (newAmount < 0) {
         await t.rollback();
         return res.status(400).json({
-          message: `Fund balance cannot be set to a negative value. Resulting balance would be ${newAmount} ${upperCurrency}.`
+          message: `Fund balance cannot be set to a negative value. Resulting balance would be ${formatCurrencyText(newAmount, upperCurrency)}.`
         });
       }
 
@@ -173,10 +174,11 @@ exports.checkFunds = [
 
       const { currency, amount } = req.params;
       const upperCurrency = currency.toUpperCase().trim();
-      const numAmount = Number(amount);
+      const rawAmount = Number(amount);
+      const numAmount = roundCurrencyAmount(rawAmount, upperCurrency);
 
-      if (isNaN(numAmount) || numAmount <= 0) {
-        return res.json({ sufficient: false, message: 'Amount must be greater than 0.00' });
+      if (isNaN(rawAmount) || numAmount <= 0) {
+        return res.json({ sufficient: false, message: 'Amount must be greater than 0 after rounding' });
       }
 
       const balance = await FundBalance.findOne({ where: { currency: upperCurrency } });

@@ -18,6 +18,8 @@ async function runMigrations() {
     };
 
     await addColIfMissing('iou_requests', 'ifs_voucher_number', 'NVARCHAR(64) NULL');
+    await addColIfMissing('iou_requests', 'cancelled_ifs_vouchers', 'NVARCHAR(MAX) NULL');
+    await addColIfMissing('direct_expense_requests', 'cancelled_ifs_vouchers', 'NVARCHAR(MAX) NULL');
     await addColIfMissing('reconciliation_records', 'ifs_voucher_number', 'NVARCHAR(64) NULL');
     await addColIfMissing('reconciliation_records', 'confirmed_by_user', 'BIT NOT NULL DEFAULT 0');
     await addColIfMissing('reconciliation_records', 'user_confirmed_at', 'DATETIME2 NULL');

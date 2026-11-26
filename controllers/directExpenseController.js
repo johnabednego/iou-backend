@@ -11,6 +11,8 @@ const notificationService = require('../services/notificationService');
 const emailService = require('../services/emailService');
 const FundBalance = require('../models/FundBalance');
 const FundTransaction = require('../models/FundTransaction');
+const { resolveDeStatusFilter, parseDateBoundary } = require('../services/filterService');
+const { roundCurrencyAmount } = require('../services/currencyService');
 const { Op } = require('sequelize');
 
 
@@ -53,11 +55,19 @@ exports.createDirectExpense = [
         return res.status(400).json({ message: 'At least one attachment (receipt/evidence) is required for a Direct Expense request.' });
       }
 
-      // Fund sufficiency check
+      // Fund sufficiency check & currency-specific rounding
       const deCurrency = (currency || 'GHS').toUpperCase().trim();
+      const roundedAmount = roundCurrencyAmount(numAmount, deCurrency);
+      if (roundedAmount <= 0) {
+        await t.rollback();
+        return res.status(400).json({
+          message: 'Amount must be greater than 0 after rounding. Requests with an amount of 0 or less are not accepted.'
+        });
+      }
+
       const fundBalance = await FundBalance.findOne({ where: { currency: deCurrency }, transaction: t });
       const available = fundBalance ? Number(fundBalance.available_amount) : 0;
-      if (available <= 0 || available < numAmount) {
+      if (available <= 0 || available < roundedAmount) {
         await t.rollback();
         return res.status(400).json({
           message: 'Insufficient funds available for this currency. Please contact the Finance Department.'
@@ -69,7 +79,7 @@ exports.createDirectExpense = [
         requester_id: actor.id,
         department: actor.department || null,
         purpose: purpose || null,
-        amount: numAmount,
+        amount: roundedAmount,
         currency: deCurrency,
         status: 'DRAFT'
       }, { transaction: t });
@@ -121,22 +131,48 @@ exports.listDirectExpenses = [
       const offset = parseInt(req.query.offset || '0', 10);
 
       const where = {};
-      if (req.query.status) where.status = req.query.status;
+      const andConditions = [];
+      if (req.query.status) {
+        const resolvedStatus = resolveDeStatusFilter(req.query.status);
+        if (resolvedStatus) where.status = resolvedStatus;
+      }
       if (req.query.department) where.department = req.query.department;
       if (req.query.currency) where.currency = req.query.currency.toUpperCase().trim();
 
+      // voucher status filter
+      if (req.query.voucher_status === 'has_cancelled') {
+        andConditions.push({ cancelled_ifs_vouchers: { [Op.like]: '%"voucher_number"%' } });
+      } else if (req.query.voucher_status === 'active_only') {
+        andConditions.push({ ifs_voucher_number: { [Op.ne]: null } });
+        andConditions.push({
+          [Op.or]: [
+            { cancelled_ifs_vouchers: null },
+            { cancelled_ifs_vouchers: '[]' }
+          ]
+        });
+      }
+
       // date range
       if (req.query.start_date || req.query.end_date) {
-        where.created_at = {};
-        if (req.query.start_date) where.created_at[Op.gte] = new Date(req.query.start_date);
-        if (req.query.end_date) {
-          const end = new Date(req.query.end_date);
-          end.setHours(23, 59, 59, 999);
-          where.created_at[Op.lte] = end;
+        const startBound = parseDateBoundary(req.query.start_date, false);
+        const endBound = parseDateBoundary(req.query.end_date, true);
+        if (req.query.date_field === 'activity') {
+          const activityCol = sequelize.fn(
+            'COALESCE',
+            sequelize.col('DirectExpenseRequest.updated_at'),
+            sequelize.col('DirectExpenseRequest.created_at'),
+            sequelize.col('DirectExpenseRequest.submitted_at')
+          );
+          if (startBound) andConditions.push(sequelize.where(activityCol, { [Op.gte]: startBound }));
+          if (endBound) andConditions.push(sequelize.where(activityCol, { [Op.lte]: endBound }));
+        } else {
+          where.created_at = {};
+          if (startBound) where.created_at[Op.gte] = startBound;
+          if (endBound) where.created_at[Op.lte] = endBound;
         }
       }
 
-      // search
+      // search (active or cancelled IFS voucher)
       const search = (req.query.search || '').trim();
       if (search) {
         const numSearch = parseFloat(search);
@@ -144,6 +180,7 @@ exports.listDirectExpenses = [
           { request_number: { [Op.like]: `%${search}%` } },
           { purpose: { [Op.like]: `%${search}%` } },
           { ifs_voucher_number: { [Op.like]: `%${search}%` } },
+          { cancelled_ifs_vouchers: { [Op.like]: `%${search}%` } },
           { '$requester.display_name$': { [Op.like]: `%${search}%` } }
         ];
         if (!isNaN(numSearch) && numSearch > 0) {
@@ -200,13 +237,16 @@ exports.listDirectExpenses = [
           const searchCond = where[Op.or];
           delete where[Op.or];
           where[Op.and] = [
+            ...andConditions,
             { [Op.or]: searchCond },
             { [Op.or]: userVisibilityCond }
           ];
         } else {
+          if (andConditions.length > 0) where[Op.and] = andConditions;
           where[Op.or] = userVisibilityCond;
         }
       } else {
+        if (andConditions.length > 0) where[Op.and] = andConditions;
         const requesterIdQ = req.query.requester_id || null;
         const allFlag = req.query.all === 'true' || req.query.all === true || false;
         if (requesterIdQ && !allFlag) where.requester_id = requesterIdQ;
@@ -307,13 +347,25 @@ exports.updateDirectExpense = [
       const payload = {};
       allowed.forEach(k => { if (req.body[k] !== undefined) payload[k] = req.body[k]; });
 
+      const targetCurrency = (payload.currency || de.currency || 'GHS').toUpperCase().trim();
+      if (payload.currency !== undefined) {
+        payload.currency = targetCurrency;
+      }
+
       if (payload.amount !== undefined) {
         const numAmount = Number(payload.amount);
         if (isNaN(numAmount) || numAmount <= 0) {
           await t.rollback();
           return res.status(400).json({ message: 'Amount must be greater than 0.00' });
         }
-        payload.amount = numAmount;
+        const roundedAmount = roundCurrencyAmount(numAmount, targetCurrency);
+        if (roundedAmount <= 0) {
+          await t.rollback();
+          return res.status(400).json({ message: 'Amount must be greater than 0 after rounding' });
+        }
+        payload.amount = roundedAmount;
+      } else if (payload.currency !== undefined) {
+        payload.amount = roundCurrencyAmount(de.amount, targetCurrency);
       }
 
       await de.update(payload, { transaction: t });
@@ -717,6 +769,11 @@ exports.confirmApproval = [
         return res.status(400).json({ message: 'No approvals found. Please assign approvers first.' });
       }
 
+      if (allApprovals.length < 2) {
+        await t.rollback();
+        return res.status(400).json({ message: 'At least 2 approvers must approve before confirming approval.' });
+      }
+
       const pendingApprovals = allApprovals.filter(a => a.decision === 'PENDING');
       if (pendingApprovals.length > 0) {
         await t.rollback();
@@ -799,10 +856,17 @@ exports.disburse = [
         return res.status(400).json({ message: 'IFS Voucher Number is required to disburse Direct Expense funds.' });
       }
 
+      const deCurrency = (de.currency || 'GHS').toUpperCase();
+      const numAmount = roundCurrencyAmount(amount, deCurrency);
+      if (isNaN(Number(amount)) || numAmount <= 0) {
+        await t.rollback();
+        return res.status(400).json({ message: 'Disbursement amount must be greater than 0' });
+      }
+
       const disbursement = await Disbursement.create({
         direct_expense_id: de.id,
         cashier_id: actor.id,
-        amount,
+        amount: numAmount,
         payment_method: payment_method || null,
         payment_reference: payment_reference || null,
         disbursed_at: new Date(),
@@ -810,8 +874,6 @@ exports.disburse = [
       }, { transaction: t });
 
       // Fund Balance Deduction
-      const deCurrency = (de.currency || 'GHS').toUpperCase();
-      const numAmount = Number(amount);
       const fundBalance = await FundBalance.findOne({ where: { currency: deCurrency }, transaction: t });
       const currentAvailable = fundBalance ? Number(fundBalance.available_amount) : 0;
 
@@ -822,7 +884,7 @@ exports.disburse = [
         });
       }
 
-      const newBalance = currentAvailable - numAmount;
+      const newBalance = roundCurrencyAmount(currentAvailable - numAmount, deCurrency);
       if (fundBalance) {
         await fundBalance.update({
           available_amount: newBalance,
@@ -1298,20 +1360,23 @@ exports.updateIfsVoucher = [
     const t = await sequelize.transaction();
     try {
       const actor = req.currentUser;
-      if (!actor) return res.status(401).json({ message: 'Not authenticated' });
-      if (!actor.is_cashier && !actor.is_admin) {
+      if (!actor) { await t.rollback(); return res.status(401).json({ message: 'Not authenticated' }); }
+      if (!actor.is_admin && actor.role !== 'cashier') {
+        await t.rollback();
         return res.status(403).json({ message: 'Cashier or admin privileges required' });
       }
 
       // Check if editing is enabled
       const AppSetting = require('../models/AppSetting');
-      const setting = await AppSetting.findOne({ where: { key: 'ifs_voucher_editing_enabled' } });
+      const setting = await AppSetting.findOne({ where: { key: 'ifs_voucher_editing_enabled' }, transaction: t });
       if (!setting || setting.value !== 'true') {
+        await t.rollback();
         return res.status(403).json({ message: 'IFS Voucher editing is currently disabled. Enable it in Settings first.' });
       }
 
       const { ifs_voucher_number } = req.body;
       if (!ifs_voucher_number || !ifs_voucher_number.trim()) {
+        await t.rollback();
         return res.status(400).json({ message: 'IFS Voucher Number is required' });
       }
 
@@ -1322,12 +1387,13 @@ exports.updateIfsVoucher = [
       await de.update({ ifs_voucher_number: ifs_voucher_number.trim() }, { transaction: t });
 
       await auditService.log({
+        actorId: actor.id,
+        actorName: actor.display_name || actor.username,
         action: 'IFS_VOUCHER_UPDATED',
-        entity_type: 'DIRECT_EXPENSE',
-        entity_id: de.id,
-        user_id: actor.id,
-        details: { old_voucher: oldVoucher, new_voucher: ifs_voucher_number.trim() }
-      }, t);
+        entity: 'DIRECT_EXPENSE',
+        entityId: de.id,
+        details: { request_number: de.request_number, old_voucher: oldVoucher, new_voucher: ifs_voucher_number.trim() }
+      }, { transaction: t });
 
       await t.commit();
       return res.json({ message: 'IFS Voucher Number updated successfully.', ifs_voucher_number: ifs_voucher_number.trim() });
@@ -1335,6 +1401,93 @@ exports.updateIfsVoucher = [
       try { await t.rollback(); } catch (_) { }
       console.error('updateIfsVoucher (DE) error', err);
       return res.status(500).json({ message: 'Error updating IFS Voucher Number' });
+    }
+  }
+];
+
+/**
+ * POST /api/direct-expenses/:id/ifs-voucher/cancel
+ * Cancel an existing IFS Voucher Number on a Direct Expense and require a new one.
+ * Keeps the cancelled voucher linked to the request for display and search.
+ */
+exports.cancelIfsVoucher = [
+  async (req, res) => {
+    const t = await sequelize.transaction();
+    try {
+      const actor = req.currentUser;
+      if (!actor) { await t.rollback(); return res.status(401).json({ message: 'Not authenticated' }); }
+      if (!actor.is_admin && actor.role !== 'cashier') {
+        await t.rollback();
+        return res.status(403).json({ message: 'Cashier or admin privileges required' });
+      }
+
+      const { new_ifs_voucher_number, reason } = req.body;
+      const newVoucher = (new_ifs_voucher_number || '').trim();
+      if (!newVoucher) {
+        await t.rollback();
+        return res.status(400).json({ message: 'A new IFS Voucher Number is required when cancelling an existing one.' });
+      }
+
+      const de = await DirectExpenseRequest.findByPk(req.params.id, { transaction: t });
+      if (!de) { await t.rollback(); return res.status(404).json({ message: 'Direct Expense not found' }); }
+
+      const currentVoucher = (de.ifs_voucher_number || '').trim();
+      if (!currentVoucher) {
+        await t.rollback();
+        return res.status(400).json({ message: 'No active IFS Voucher Number exists on this Direct Expense to cancel.' });
+      }
+
+      if (newVoucher.toLowerCase() === currentVoucher.toLowerCase()) {
+        await t.rollback();
+        return res.status(400).json({ message: 'The new IFS Voucher Number must be different from the one being cancelled.' });
+      }
+
+      const existingCancelled = Array.isArray(de.cancelled_ifs_vouchers) ? de.cancelled_ifs_vouchers : [];
+      if (existingCancelled.some(c => (c.voucher_number || '').trim().toLowerCase() === newVoucher.toLowerCase())) {
+        await t.rollback();
+        return res.status(400).json({ message: 'That IFS Voucher Number has already been cancelled on this request.' });
+      }
+
+      const updatedCancelled = [
+        ...existingCancelled,
+        {
+          voucher_number: currentVoucher,
+          cancelled_at: new Date().toISOString(),
+          cancelled_by: actor.id,
+          reason: reason && reason.trim() ? reason.trim() : null,
+          replaced_by: newVoucher
+        }
+      ];
+
+      await de.update({
+        ifs_voucher_number: newVoucher,
+        cancelled_ifs_vouchers: updatedCancelled
+      }, { transaction: t });
+
+      await auditService.log({
+        actorId: actor.id,
+        actorName: actor.display_name || actor.username,
+        action: 'IFS_VOUCHER_CANCELLED',
+        entity: 'DIRECT_EXPENSE',
+        entityId: de.id,
+        details: {
+          request_number: de.request_number,
+          cancelled_voucher: currentVoucher,
+          new_voucher: newVoucher,
+          reason: reason && reason.trim() ? reason.trim() : null
+        }
+      }, { transaction: t });
+
+      await t.commit();
+      return res.json({
+        message: `IFS Voucher "${currentVoucher}" cancelled and replaced with "${newVoucher}".`,
+        ifs_voucher_number: newVoucher,
+        cancelled_ifs_vouchers: updatedCancelled
+      });
+    } catch (err) {
+      try { await t.rollback(); } catch (_) { }
+      console.error('cancelIfsVoucher (DE) error', err);
+      return res.status(500).json({ message: 'Error cancelling IFS Voucher Number' });
     }
   }
 ];

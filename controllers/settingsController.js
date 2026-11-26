@@ -140,3 +140,70 @@ exports.setIfsVoucherEditing = [
     }
   }
 ];
+
+/**
+ * GET /api/settings/inactivity-timeout
+ * Returns the inactivity timeout (in minutes) before auto-logout prompt. Default: 5 minutes.
+ * Available to all authenticated users.
+ */
+exports.getInactivityTimeout = [
+  async (req, res) => {
+    try {
+      const actor = req.currentUser;
+      if (!actor) return res.status(401).json({ message: 'Not authenticated' });
+
+      const setting = await AppSetting.findOne({ where: { key: 'inactivity_timeout_minutes' } });
+      const parsed = setting && setting.value ? parseInt(setting.value, 10) : NaN;
+      const timeoutMinutes = !isNaN(parsed) && parsed >= 1 ? parsed : 5;
+
+      return res.json({
+        timeout_minutes: timeoutMinutes,
+        is_default: !setting || !setting.value
+      });
+    } catch (err) {
+      console.error('getInactivityTimeout error', err);
+      return res.status(500).json({ message: 'Error fetching inactivity timeout setting' });
+    }
+  }
+];
+
+/**
+ * PUT /api/settings/inactivity-timeout
+ * Admin-only: set inactivity timeout in minutes (1 to 480).
+ * Body: { timeout_minutes: number }
+ */
+exports.setInactivityTimeout = [
+  async (req, res) => {
+    try {
+      const actor = req.currentUser;
+      if (!actor) return res.status(401).json({ message: 'Not authenticated' });
+      if (!actor.is_admin) return res.status(403).json({ message: 'Admin privileges required' });
+
+      const raw = req.body?.timeout_minutes;
+      const minutes = parseInt(raw, 10);
+      if (isNaN(minutes) || minutes < 1 || minutes > 480 || String(Number(raw)) !== String(minutes)) {
+        return res.status(400).json({ message: 'timeout_minutes must be a whole number between 1 and 480 minutes.' });
+      }
+
+      const [setting, created] = await AppSetting.findOrCreate({
+        where: { key: 'inactivity_timeout_minutes' },
+        defaults: {
+          value: String(minutes),
+          description: 'Minutes of inactivity before prompting user with a 1-minute countdown to extend session.'
+        }
+      });
+
+      if (!created) {
+        await setting.update({ value: String(minutes) });
+      }
+
+      return res.json({
+        message: `Inactivity timeout updated to ${minutes} minute(s).`,
+        timeout_minutes: minutes
+      });
+    } catch (err) {
+      console.error('setInactivityTimeout error', err);
+      return res.status(500).json({ message: 'Error updating inactivity timeout setting' });
+    }
+  }
+];

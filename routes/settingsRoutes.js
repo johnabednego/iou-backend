@@ -1,7 +1,14 @@
 // routes/settingsRoutes.js
 const express = require('express');
 const router = express.Router();
-const { getDateLimit, setDateLimit, getIfsVoucherEditing, setIfsVoucherEditing } = require('../controllers/settingsController');
+const {
+  getDateLimit,
+  setDateLimit,
+  getIfsVoucherEditing,
+  setIfsVoucherEditing,
+  getInactivityTimeout,
+  setInactivityTimeout
+} = require('../controllers/settingsController');
 const { isAuthenticated } = require('../middleware/auth');
 
 /**
@@ -105,5 +112,33 @@ router.get('/ifs-voucher-editing', isAuthenticated, getIfsVoucherEditing);
  *         description: Admin required
  */
 router.put('/ifs-voucher-editing', isAuthenticated, setIfsVoucherEditing);
+
+/**
+ * @swagger
+ * /settings/inactivity-timeout:
+ *   get:
+ *     summary: Get the inactivity auto-logout prompt timeout in minutes
+ *     tags: [Settings]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       '200':
+ *         description: Inactivity timeout setting
+ */
+router.get('/inactivity-timeout', isAuthenticated, getInactivityTimeout);
+
+/**
+ * @swagger
+ * /settings/inactivity-timeout:
+ *   put:
+ *     summary: Set inactivity auto-logout prompt timeout in minutes (admin only)
+ *     tags: [Settings]
+ *     security:
+ *       - cookieAuth: []
+ *     responses:
+ *       '200':
+ *         description: Setting updated
+ */
+router.put('/inactivity-timeout', isAuthenticated, setInactivityTimeout);
 
 module.exports = router;

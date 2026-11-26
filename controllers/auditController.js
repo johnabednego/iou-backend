@@ -34,6 +34,7 @@ exports.listAuditLogs = [
           where: {
             [Op.or]: [
               { ifs_voucher_number: { [Op.like]: `%${search}%` } },
+              { cancelled_ifs_vouchers: { [Op.like]: `%${search}%` } },
               { request_number: { [Op.like]: `%${search}%` } }
             ]
           },
@@ -49,6 +50,7 @@ exports.listAuditLogs = [
           where: {
             [Op.or]: [
               { ifs_voucher_number: { [Op.like]: `%${search}%` } },
+              { cancelled_ifs_vouchers: { [Op.like]: `%${search}%` } },
               { request_number: { [Op.like]: `%${search}%` } }
             ]
           },
