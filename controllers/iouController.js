@@ -13,6 +13,7 @@ const emailService = require('../services/emailService');
 const FundBalance = require('../models/FundBalance');
 const { resolveIouStatusFilter, parseDateBoundary } = require('../services/filterService');
 const { roundCurrencyAmount } = require('../services/currencyService');
+const { canViewRequestDetail, buildListVisibility } = require('../services/accessControlService');
 const { Op } = require('sequelize');
 
 
@@ -225,71 +226,38 @@ exports.listIOUs = [
         where[Op.or] = searchOr;
       }
 
-      // Access control for IOU list:
-      // Cashiers, Admins, and Approvers can view all company IOUs (with optional requester_id filter)
-      // HODs can view IOUs they created, IOUs they approve, PLUS all IOUs belonging to their department(s)
-      // Normal employees only see IOUs they created OR are assigned to approve.
-      const isCashierOrAdmin = actor.is_admin || actor.role === 'cashier' || actor.is_approver === true;
-
-      if (!isCashierOrAdmin) {
-        const userApprovalRecords = await Approval.findAll({
-          where: { approver_id: actor.id },
-          attributes: ['iou_id'],
-          raw: true
-        });
-        const approvedIouIds = userApprovalRecords.map(a => a.iou_id).filter(Boolean);
-
-        const userVisibilityCond = [{ requester_id: actor.id }];
-        if (approvedIouIds.length > 0) {
-          userVisibilityCond.push({ id: { [Op.in]: approvedIouIds } });
-        }
-
-        // If user is an HOD, also include all IOUs from departments they head
-        try {
-          const DepartmentHOD = require('../models/DepartmentHOD');
-          const hodLinks = await DepartmentHOD.findAll({
-            where: { user_id: actor.id },
-            attributes: ['department_id'],
+      // Access control & view scoping for IOU list:
+      // - Admins, Cashiers, Authorizers, and Managed Approvers: company-wide ('all') or narrowed ('approvals', 'mine')
+      // - HODs: managed department(s) ('department'), 'approvals', 'mine', or combined default
+      // - Regular Employees: strictly own submissions (+ explicitly assigned approvals), never coworkers in their department
+      const visibility = await buildListVisibility({
+        actor,
+        requestedScope: req.query.scope,
+        allFlag: req.query.all,
+        requesterIdQ: req.query.requester_id || null,
+        getApprovedIdsFn: async (uid) => {
+          const recs = await Approval.findAll({
+            where: { approver_id: uid, iou_id: { [Op.ne]: null } },
+            attributes: ['iou_id'],
             raw: true
           });
-          const deptIds = hodLinks.map(h => h.department_id);
-          const managedDepts = await Department.findAll({
-            where: {
-              [Op.or]: [
-                ...(deptIds.length > 0 ? [{ id: { [Op.in]: deptIds } }] : []),
-                { hod_user_id: actor.id }
-              ]
-            },
-            attributes: ['name'],
-            raw: true
-          });
-          const deptNames = managedDepts.map(d => d.name);
-          if (actor.role === 'hod' && actor.department && !deptNames.includes(actor.department)) {
-            deptNames.push(actor.department);
-          }
-
-          if (deptNames.length > 0) {
-            userVisibilityCond.push({ department: { [Op.in]: deptNames } });
-          }
-        } catch (_) {}
-
-        if (where[Op.or]) {
-          const searchCond = where[Op.or];
-          delete where[Op.or];
-          where[Op.and] = [
-            ...andConditions,
-            { [Op.or]: searchCond },
-            { [Op.or]: userVisibilityCond }
-          ];
-        } else {
-          if (andConditions.length > 0) where[Op.and] = andConditions;
-          where[Op.or] = userVisibilityCond;
+          return [...new Set(recs.map(r => r.iou_id).filter(Boolean))];
         }
-      } else {
-        if (andConditions.length > 0) where[Op.and] = andConditions;
-        const requesterIdQ = req.query.requester_id || null;
-        const allFlag = req.query.all === 'true' || req.query.all === true || false;
-        if (requesterIdQ && !allFlag) where.requester_id = requesterIdQ;
+      });
+
+      if (visibility.mode === 'EMPTY') {
+        return res.json({ data: [], total: 0, limit, offset });
+      }
+
+      if (visibility.condition) {
+        andConditions.push(visibility.condition);
+      }
+      if (where[Op.or]) {
+        andConditions.push({ [Op.or]: where[Op.or] });
+        delete where[Op.or];
+      }
+      if (andConditions.length > 0) {
+        where[Op.and] = andConditions;
       }
 
       // Build include array: include requester user (LEFT JOIN so IOUs without a matched requester still appear)
@@ -381,15 +349,9 @@ exports.getIOU = [
       const iou = await IOURequest.findByPk(id);
       if (!iou) return res.status(404).json({ message: 'IOU not found' });
 
-      // Access control: owner, admin, cashier, HOD, or assigned approver
-      const isOwner = iou.requester_id === actor.id;
-      const isCashierOrHod = ['cashier', 'hod'].includes(actor.role);
-      let isAssignedApprover = false;
-      if (!isOwner && !actor.is_admin && !isCashierOrHod) {
-        const approverRecord = await Approval.findOne({ where: { iou_id: iou.id, approver_id: actor.id } });
-        isAssignedApprover = !!approverRecord;
-      }
-      if (!actor.is_admin && !isOwner && !isCashierOrHod && !isAssignedApprover) {
+      // Access control: owner, admin, cashier, authorizer/approver, department HOD, or assigned approver
+      const canView = await canViewRequestDetail(actor, iou, { iou_id: iou.id });
+      if (!canView) {
         return res.status(403).json({ message: 'Forbidden' });
       }
 

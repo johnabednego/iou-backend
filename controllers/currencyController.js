@@ -6,11 +6,12 @@ const sequelize = require('../config/database');
 const { Op } = require('sequelize');
 const auditService = require('../services/auditService');
 const { formatCurrencyText } = require('../services/currencyService');
+const { canViewAllCompany } = require('../services/accessControlService');
 
 /**
  * GET /api/currencies
  * List currencies. Active by default for normal users.
- * Admin/cashier/approver: see all (including inactive with transactions).
+ * Admin/cashier/authorizer/approver: see all (including inactive with transactions).
  * Normal users: see active + inactive currencies they have personally used.
  */
 exports.listCurrencies = [
@@ -19,7 +20,7 @@ exports.listCurrencies = [
       const actor = req.currentUser;
       if (!actor) return res.status(401).json({ message: 'Not authenticated' });
 
-      const isPrivileged = actor.is_admin || actor.role === 'cashier' || actor.is_approver;
+      const isPrivileged = canViewAllCompany(actor);
       const includeInactive = req.query.include_inactive === 'true';
 
       // Get all currencies from DB

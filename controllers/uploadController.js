@@ -136,12 +136,24 @@ exports.getDownloadUrl = [
       }
 
       // Access control:
-      // Allow admin, cashier, approver, HOD, uploader, or request owner
-      const isPrivileged = actor.is_admin || actor.role === 'cashier' || actor.is_approver === true || actor.role === 'hod';
+      // Allow admin, cashier, authorizer/approver, uploader, request owner, department HOD, or assigned approver
+      const { canViewAllCompany, canViewRequestDetail, isHodUser } = require('../services/accessControlService');
       const isUploader = String(attachment.uploaded_by) === String(actor.id);
       const isOwner = parent && String(parent.requester_id) === String(actor.id);
+      let allowed = canViewAllCompany(actor) || isUploader || isOwner;
+      if (!allowed && parent) {
+        allowed = await canViewRequestDetail(
+          actor,
+          parent,
+          type === 'DIRECT_EXPENSE'
+            ? { direct_expense_id: parent.id, approval_type: 'direct_expense' }
+            : { iou_id: parent.id }
+        );
+      } else if (!allowed && isHodUser(actor)) {
+        allowed = true;
+      }
 
-      if (!isPrivileged && !isUploader && !isOwner) {
+      if (!allowed) {
         return res.status(403).json({ message: 'Forbidden' });
       }
 

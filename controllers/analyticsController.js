@@ -4,13 +4,14 @@ const ExpenseSubmission = require('../models/ExpenseSubmission');
 const ReconciliationRecord = require('../models/ReconciliationRecord');
 const sequelize = require('../config/database');
 const { Op, fn, col, literal } = require('sequelize');
+const { canViewAllCompany, isHodUser, getManagedDepartmentNames } = require('../services/accessControlService');
 let DirectExpenseRequest;
 try { DirectExpenseRequest = require('../models/DirectExpenseRequest'); } catch (_) { }
 
 /**
  * GET /api/analytics/dashboard
  * Returns comprehensive analytics for the dashboard charts.
- * Access: authenticated users. Normal users see only their own; admin/cashier/approver see all.
+ * Access: authenticated users. Normal users see only their own; admin/cashier/authorizer/approver see all.
  */
 exports.getDashboardAnalytics = [
   async (req, res) => {
@@ -18,27 +19,14 @@ exports.getDashboardAnalytics = [
       const actor = req.currentUser;
       if (!actor) return res.status(401).json({ message: 'Not authenticated' });
 
-      const isPrivileged = actor.is_admin || actor.role === 'cashier' || actor.is_approver;
-      const isHod = actor.role === 'hod';
+      const isPrivileged = canViewAllCompany(actor);
+      const isHod = isHodUser(actor);
       let userFilter = {};
 
       // Find departments managed by HOD
       let hodDeptNames = [];
       if (isHod) {
-        try {
-          const DepartmentHOD = require('../models/DepartmentHOD');
-          const Department = require('../models/Department');
-          const hodLinks = await DepartmentHOD.findAll({ where: { user_id: actor.id }, attributes: ['department_id'], raw: true });
-          const deptIds = hodLinks.map(h => h.department_id);
-          const managedDepts = await Department.findAll({
-            where: { [Op.or]: [...(deptIds.length > 0 ? [{ id: { [Op.in]: deptIds } }] : []), { hod_user_id: actor.id }] },
-            attributes: ['name'], raw: true
-          });
-          hodDeptNames = managedDepts.map(d => d.name);
-          if (actor.department && !hodDeptNames.includes(actor.department)) {
-            hodDeptNames.push(actor.department);
-          }
-        } catch (_) { }
+        hodDeptNames = await getManagedDepartmentNames(actor);
       }
 
       if (isPrivileged) {

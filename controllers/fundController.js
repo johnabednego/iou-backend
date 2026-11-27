@@ -6,17 +6,18 @@ const User = require('../models/User');
 const sequelize = require('../config/database');
 const auditService = require('../services/auditService');
 const { roundCurrencyAmount, formatCurrencyText } = require('../services/currencyService');
+const { canViewAllCompany } = require('../services/accessControlService');
 
 /**
  * GET /api/funds
- * List all fund balances for ACTIVE currencies (cashier/admin/approver only)
+ * List all fund balances for ACTIVE currencies (cashier/admin/authorizer/approver only)
  */
 exports.listFundBalances = [
   async (req, res) => {
     try {
       const actor = req.currentUser;
       if (!actor) return res.status(401).json({ message: 'Not authenticated' });
-      if (!actor.is_admin && actor.role !== 'cashier' && !actor.is_approver) {
+      if (!canViewAllCompany(actor)) {
         return res.status(403).json({ message: 'Insufficient permissions' });
       }
 
